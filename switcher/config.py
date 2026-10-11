@@ -1,57 +1,17 @@
 """人格切换插件的配置模型。
 
-WebUI 依据这里的模型渲染配置页，Runner 依据它生成默认 ``config.toml``：
+WebUI 依据这里的模型渲染配置页，Runner 依据它生成默认 ``config.toml``。
 
-* 「人格列表」是一张可编辑表格，加一行就多一个人格；
-* 每个人格下面挂着若干条触发规则，规则命中就给人格加分；
-* 分数顶到 ``threshold`` 就切到该人格，``duration_minutes`` 分钟后自动切回原人格。
+加分只有一条来源：**模型判定**。插件把最近的对话交给模型，模型按每个人格的
+「判定条件」回编号，命中就按该人格的「命中加分」加分；分数顶到阈值切过去，
+维持一段时间后自动切回原人格，分数还会随时间衰减。
 """
-
-from typing import Literal
 
 from maibot_sdk import Field, PluginConfigBase
 
 
-class TriggerRule(PluginConfigBase):
-    """一条加分规则：什么样的消息算数、加多少分、多久内只算一次。"""
-
-    patterns: str = Field(
-        default="",
-        description=(
-            "触发内容，一行一条。关键词模式按「包含」匹配，正则模式按 re.search 匹配。"
-            "留空表示这条规则不参与匹配（可以用来临时停用一条规则）。"
-        ),
-        json_schema_extra={"label": "触发内容", "placeholder": "例如：\\n笨\\n蠢\\n傻"},
-    )
-    weight: float = Field(
-        default=10.0,
-        description="命中一次给该人格加多少分",
-        json_schema_extra={"label": "加分", "min": 0.0, "step": 1.0},
-    )
-    match_mode: Literal["keyword", "regex"] = Field(
-        default="keyword",
-        description="keyword：按包含匹配，适合列举词；regex：按正则匹配，适合「一个字 + 任意内容」这类写法",
-        json_schema_extra={"label": "匹配方式"},
-    )
-    require_mention: bool = Field(
-        default=False,
-        description="开启后只有 @ 了麦麦的消息才算命中，避免群友互相聊天时也加分",
-        json_schema_extra={"label": "需要 @ 麦麦"},
-    )
-    cooldown_seconds: float = Field(
-        default=0.0,
-        description="同一条规则的加分冷却，0 表示不限。用来防止有人刷屏把分数瞬间顶满",
-        json_schema_extra={"label": "冷却秒数", "min": 0.0, "step": 1.0},
-    )
-    note: str = Field(
-        default="",
-        description="备注，只用于自己辨认这条规则",
-        json_schema_extra={"label": "备注"},
-    )
-
-
 class PersonaEntry(PluginConfigBase):
-    """一个人格：分数阈值、生效时长、替换掉的设定文本、以及加分规则。"""
+    """一个人格：什么情况算它、分数阈值、生效时长，以及要替换掉的设定文本。"""
 
     id: str = Field(
         default="",
@@ -63,9 +23,22 @@ class PersonaEntry(PluginConfigBase):
         description="人格显示名，出现在日志与 /人格 指令的返回里",
         json_schema_extra={"label": "人格名称", "placeholder": "例如 嘴臭人格"},
     )
+    criteria: str = Field(
+        default="",
+        description=(
+            "判定条件：用一句话描述「对方做了什么」就算它，交给模型判断。"
+            "例如「对方在骂麦麦、阴阳怪气地嘲讽麦麦，或者明显在挑衅、抬杠」。留空表示这个人格不参与自动切换"
+        ),
+        json_schema_extra={"label": "判定条件"},
+    )
+    weight: float = Field(
+        default=12.0,
+        description="模型判定命中一次给该人格加多少分",
+        json_schema_extra={"label": "命中加分", "min": 0.0, "step": 1.0},
+    )
     threshold: float = Field(
         default=30.0,
-        description="该人格的分数阈值，加到这么多分就切换过去；填 0 表示这个人格不参与自动切换",
+        description="该人格的分数阈值，加到这么多分就切换过去；填 0 表示这个人格只手动用",
         json_schema_extra={"label": "切换阈值", "min": 0.0, "step": 1.0},
     )
     duration_minutes: float = Field(
@@ -93,34 +66,6 @@ class PersonaEntry(PluginConfigBase):
         description="额外附加到本次回复要求里的硬性约束，用来强调「这次必须按临时人格说话」",
         json_schema_extra={"label": "额外要求"},
     )
-    max_gain_per_message: float = Field(
-        default=0.0,
-        description="单条消息给该人格加分的上限，0 表示不限。防止一句话同时命中好几条规则时直接顶满",
-        json_schema_extra={"label": "单条消息加分上限", "min": 0.0, "step": 1.0},
-    )
-    cooldown_seconds: float = Field(
-        default=0.0,
-        description="该人格整体的加分冷却，0 表示不限。规则自己的冷却之外再加一道闸",
-        json_schema_extra={"label": "人格冷却秒数", "min": 0.0, "step": 1.0},
-    )
-    llm_criteria: str = Field(
-        default="",
-        description=(
-            "交给模型判断的软性条件，例如「对方在挑衅、阴阳怪气地嘲讽麦麦」。"
-            "留空表示这个人格不参与模型判定；需要同时开启「模型判定」才会生效"
-        ),
-        json_schema_extra={"label": "模型判定条件"},
-    )
-    llm_weight: float = Field(
-        default=0.0,
-        description="模型判定命中时给该人格加多少分，0 表示不加分",
-        json_schema_extra={"label": "模型判定加分", "min": 0.0, "step": 1.0},
-    )
-    triggers: list[TriggerRule] = Field(
-        default_factory=list,
-        description="该人格的加分规则列表，命中即加分",
-        json_schema_extra={"label": "触发规则"},
-    )
 
 
 class PluginSection(PluginConfigBase):
@@ -131,13 +76,13 @@ class PluginSection(PluginConfigBase):
     __ui_order__ = 0
 
     config_version: str = Field(
-        default="1.0.0",
+        default="2.0.0",
         description="配置版本，普通用户不要修改",
         json_schema_extra={"label": "配置版本"},
     )
     enabled: bool = Field(
         default=True,
-        description="关闭后不再计分，也不再有人格切换，麦麦始终使用原本的人格",
+        description="关闭后不再判定、不再加分，也就不再有人格切换，麦麦始终使用原本的人格",
         json_schema_extra={"label": "启用插件"},
     )
 
@@ -188,7 +133,7 @@ class SwitchingSection(PluginConfigBase):
     )
     accumulate_while_active: bool = Field(
         default=False,
-        description="临时人格生效期间是否继续计分。默认关闭：生效期间不再加分，避免到点后立刻被同一批话再次顶起来",
+        description="临时人格生效期间是否继续判定加分。默认关闭：生效期间不再调模型，等它自然到期",
         json_schema_extra={"label": "生效期间继续计分"},
     )
     inject_planner: bool = Field(
@@ -214,20 +159,23 @@ class SwitchingSection(PluginConfigBase):
 
 
 class EvaluationSection(PluginConfigBase):
-    """可选的模型判定：关键词覆盖不到的软性条件交给模型判断。"""
+    """模型判定设置：插件唯一的加分来源。"""
 
     __ui_label__ = "模型判定"
     __ui_icon__ = "brain"
     __ui_order__ = 3
 
     enabled: bool = Field(
-        default=False,
-        description="开启后把最近的对话交给模型判断一次，命中某个人格的「模型判定条件」就加分。会消耗 token",
+        default=True,
+        description="关闭后不再调模型判定，也就不会有任何加分；临时人格仍然会正常到期恢复",
         json_schema_extra={"label": "启用模型判定"},
     )
     model_task: str = Field(
-        default="utils",
-        description="用哪个模型任务来判定，填宿主 model_config 里的任务名（如 utils、replyer）；留空则用默认任务",
+        default="fast_model",
+        description=(
+            "用哪个模型任务来判定，填宿主 model_config 里的任务名。"
+            "建议用快而便宜的小模型：fast_model（快速模型）或 utils"
+        ),
         json_schema_extra={"label": "模型任务"},
     )
     temperature: float = Field(
@@ -240,20 +188,30 @@ class EvaluationSection(PluginConfigBase):
         description="判定回复的最大 token 数，判定只输出编号，不需要很长",
         json_schema_extra={"label": "最大输出 token", "min": 8, "step": 8},
     )
+    debounce_seconds: float = Field(
+        default=1.5,
+        description="收到消息后先等这么久再判定，把连着发的几条消息并成一次调用",
+        json_schema_extra={"label": "抖动等待秒", "min": 0.0, "step": 0.5},
+    )
     cooldown_seconds: float = Field(
-        default=30.0,
-        description="同一个会话两次判定的最小间隔，避免每条消息都调一次模型",
-        json_schema_extra={"label": "判定冷却秒", "min": 0.0, "step": 5.0},
+        default=5.0,
+        description="同一个会话两次判定的最小间隔，防止热聊时每条消息都调一次模型",
+        json_schema_extra={"label": "判定冷却秒", "min": 0.0, "step": 1.0},
     )
     recent_message_count: int = Field(
-        default=6,
-        description="判定时带上最近多少条对话作为背景",
+        default=8,
+        description="判定时带上的最近对话条数（含最新一条），给模型足够的上文",
         json_schema_extra={"label": "背景消息条数", "min": 1, "step": 1},
     )
     min_text_length: int = Field(
-        default=4,
-        description="消息短于这个长度就不判定，省掉「嗯」「哦」这类没信息量的调用",
+        default=2,
+        description="消息短于这个长度就不判定，省掉「嗯」「？」，以及表情包/图片这类占位文本的调用",
         json_schema_extra={"label": "最短判定长度", "min": 0, "step": 1},
+    )
+    log_raw_response: bool = Field(
+        default=True,
+        description="把模型判定的原始回复写进 DEBUG 日志，用来确认判定是否按预期工作",
+        json_schema_extra={"label": "记录判定原始输出"},
     )
 
 
@@ -288,6 +246,11 @@ class PersonaSection(PluginConfigBase):
             PersonaEntry(
                 id="sharp_tongue",
                 name="嘴臭人格",
+                criteria=(
+                    "对方在骂麦麦、阴阳怪气地嘲讽麦麦，或者明显在挑衅、抬杠；"
+                    "也包括拿麦麦当出气筒、连着几句都在怼麦麦。普通的玩笑和吐槽不算"
+                ),
+                weight=12.0,
                 threshold=30.0,
                 duration_minutes=8.0,
                 personality=(
@@ -300,28 +263,12 @@ class PersonaSection(PluginConfigBase):
                 behavior_style="更倾向于直接怼回去、抬杠挑刺，不要主动示好或安抚对方。",
                 reply_style="短句、冲、带点阴阳怪气；可以用「就这?」「你行你上」「啊对对对」这类口头禅；不用敬语，也不加卖萌的语气词。",
                 extra_prompt="这次回复必须严格按系统提示里【临时人格】的设定说，不要回到平时温和的语气，也不要解释自己的状态。",
-                max_gain_per_message=20.0,
-                cooldown_seconds=2.0,
-                llm_criteria="对方在骂麦麦、阴阳怪气地嘲讽麦麦，或者明显在挑衅、抬杠。",
-                llm_weight=12.0,
-                triggers=[
-                    TriggerRule(
-                        patterns="笨\n蠢\n傻\n呆\n菜\n就这\n你行你上\n离谱\n呵呵",
-                        weight=6.0,
-                        cooldown_seconds=5.0,
-                        note="轻怼",
-                    ),
-                    TriggerRule(
-                        patterns="智障\n弱智\n脑残\n有病\n废物\n垃圾\n滚\n闭嘴\n恶心\n沙比\n煞笔\nsb",
-                        weight=14.0,
-                        cooldown_seconds=3.0,
-                        note="明确骂人",
-                    ),
-                ],
             ),
             PersonaEntry(
                 id="sweet",
                 name="撒娇人格",
+                criteria="对方在夸麦麦、向麦麦示好，或者表达了喜欢、想念，语气明显是宠着麦麦的",
+                weight=10.0,
                 threshold=24.0,
                 duration_minutes=6.0,
                 personality=(
@@ -333,32 +280,12 @@ class PersonaSection(PluginConfigBase):
                 behavior_style="更主动、更黏人，愿意主动找话、讨夸，语气软一些。",
                 reply_style="软乎乎的语气，可以用「嘿嘿」「嘛」「啦」「好耶～」这类语气词，但不要每句都堆叠。",
                 extra_prompt="这次回复必须严格按系统提示里【临时人格】的设定说，比平时更软、更黏人一些。",
-                max_gain_per_message=16.0,
-                cooldown_seconds=3.0,
-                llm_criteria="对方在夸麦麦、向麦麦示好，或者表达了喜欢。",
-                llm_weight=10.0,
-                triggers=[
-                    TriggerRule(
-                        patterns="可爱\n好棒\n好厉害\n喜欢你\n爱你\n亲亲\n贴贴\n么么\n乖\n辛苦啦",
-                        weight=8.0,
-                        require_mention=True,
-                        cooldown_seconds=8.0,
-                        note="被夸被示好，需要 @ 到麦麦",
-                    ),
-                    TriggerRule(
-                        patterns="谢谢\n感谢\n麻烦你了",
-                        weight=5.0,
-                        require_mention=True,
-                        cooldown_seconds=15.0,
-                        note="道谢",
-                    ),
-                ],
             ),
         ],
-        description="每个条目是一个可切换的人格。分数顶到「切换阈值」就切过去，维持「维持分钟」分钟后自动切回原人格",
+        description="每个条目是一个可切换的人格。模型判定命中就按「命中加分」加分，分数顶到「切换阈值」切过去，维持「维持分钟」分钟后自动切回原人格",
         json_schema_extra={
             "label": "人格",
-            "hint": "想加人格就加一行：填好 ID、阈值、维持时长和三段设定文本，再到「触发规则」里加加分条件。",
+            "hint": "想加人格就加一行：填好 ID、判定条件、命中加分、阈值、维持时长和三段设定文本。",
         },
     )
 

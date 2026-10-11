@@ -3,11 +3,12 @@
 用法：
     <MaiBot>/python-env/python.exe plugins/persona-switcher/tests/selfcheck.py
 
-覆盖两段：
+覆盖四段：
 
-1. 计分与状态：加分、衰减（含宽限期与上限）、冷却、切换、到期、落盘往返；
-2. Hook 与指令：骂人触发切换、其他人格清零、回复提示词被替换、规划器行为风格被替换、
-   额外要求被并入、指令状态文本、到期后停止改写。
+1. 计分与状态：加分、衰减（含宽限期与上限）、切换、到期、落盘往返；
+2. 人格档案与判定解析：判定条件/加分/阈值的取值、编号解析、判定提示词；
+3. Hook 与指令：消息 → 模型判定 → 加分 → 切换 → 提示词替换 → 指令 → 到期停止改写；
+4. 判定节流与异常：抖动等待合并连发消息、判定冷却、模型调用失败不炸。
 """
 
 from __future__ import annotations
@@ -19,13 +20,15 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Sequence
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PLUGIN_DIR))
 
+from switcher.config import PersonaEntry  # noqa: E402
+from switcher.evaluator import build_judge_prompt, parse_verdict  # noqa: E402
+from switcher.personas import build_profiles, judged_profiles  # noqa: E402
 from switcher.state import ScoreBoard  # noqa: E402
-from switcher.triggers import compile_personas, match_message  # noqa: E402
 
 
 def load_plugin_class() -> Any:
@@ -76,15 +79,18 @@ class FakeConfigCapability:
 
 
 class FakeLLMCapability:
-    """伪造的 ``ctx.llm``：固定回答「第 1 个条件命中」。"""
+    """伪造的 ``ctx.llm``：按脚本依次返回判定结果，并记录每次的提示词。"""
 
-    def __init__(self, response: str = "1") -> None:
-        self._response = response
-        self.calls: List[str] = []
+    def __init__(self, responses: Sequence[Any] = ("none",)) -> None:
+        self.responses: List[Any] = list(responses)
+        self.prompts: List[str] = []
 
     async def generate(self, prompt: Any, **kwargs: Any) -> Dict[str, Any]:
-        self.calls.append(str(prompt))
-        return {"success": True, "response": self._response}
+        self.prompts.append(str(prompt))
+        response = self.responses.pop(0) if self.responses else "none"
+        if isinstance(response, dict):
+            return response
+        return {"success": True, "response": response}
 
 
 class FakePaths:
@@ -183,8 +189,34 @@ class Checker:
         self.expect(abs(actual - expected) <= tolerance, description, f"实际 {actual:.4f}，期望 {expected:.4f}")
 
 
+async def drain_judgements(plugin: Any, timeout: float = 3.0) -> None:
+    """等待插件的后台判定任务跑完（含积压消息触发的补判）。"""
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        running = [task for task in list(plugin._judge_tasks.values()) if not task.done()]
+        if not running and not plugin._judge_pending:
+            return
+        if running:
+            await asyncio.gather(*running, return_exceptions=True)
+        await asyncio.sleep(0.02)
+
+
+def apply_evaluation_config(plugin: Any, **overrides: Any) -> None:
+    """在默认配置上打补丁（自检里用很小的抖动/冷却，避免真的等几秒）。"""
+
+    config_data = plugin.get_default_config()
+    config_data["evaluation"]["debounce_seconds"] = 0.05
+    config_data["evaluation"]["cooldown_seconds"] = 0.05
+    config_data["evaluation"]["min_text_length"] = 1
+    config_data["switching"]["save_interval_seconds"] = 0.0
+    config_data["evaluation"].update(overrides)
+    plugin.set_plugin_config(config_data)
+    plugin._apply_config()
+
+
 def check_score_board(checker: Checker, data_dir: Path) -> None:
-    """校验计分、衰减、冷却、切换与落盘。"""
+    """校验计分、衰减、到期与落盘。"""
 
     print("\n[1] 计分与状态")
     board = ScoreBoard(data_dir / "scores.json", max_sessions=10)
@@ -193,128 +225,117 @@ def check_score_board(checker: Checker, data_dir: Path) -> None:
 
     board.add_gain("s1", "sharp_tongue", 20.0, now)
     checker.expect_close(board.effective_score("s1", "sharp_tongue", now), 20.0, "加分后立即读取等于加分值")
-
-    # 宽限期内不衰减
     checker.expect_close(
-        board.effective_score("s1", "sharp_tongue", now + 60.0),
-        20.0,
-        "宽限期（1 分钟）内分数不掉",
+        board.effective_score("s1", "sharp_tongue", now + 60.0), 20.0, "宽限期（1 分钟）内分数不掉"
     )
-    # 宽限期后按每分钟 6 分衰减
     checker.expect_close(
-        board.effective_score("s1", "sharp_tongue", now + 120.0),
-        14.0,
-        "宽限期后每分钟衰减 6 分",
+        board.effective_score("s1", "sharp_tongue", now + 120.0), 14.0, "宽限期后每分钟衰减 6 分"
     )
-    # 衰减到 0 就停住，不会变负
     checker.expect_close(
-        board.effective_score("s1", "sharp_tongue", now + 600.0),
-        0.0,
-        "分数衰减到 0 后不再下降",
+        board.effective_score("s1", "sharp_tongue", now + 600.0), 0.0, "分数衰减到 0 后不再下降"
     )
 
-    # 上限生效
     board.add_gain("s1", "sharp_tongue", 999.0, now + 700.0)
     checker.expect_close(
-        board.effective_score("s1", "sharp_tongue", now + 700.0),
-        50.0,
-        "分数被 score_cap 截断",
+        board.effective_score("s1", "sharp_tongue", now + 700.0), 50.0, "分数被 score_cap 截断"
     )
 
-    # 冷却
-    board.mark_cooldown("s1", "sharp_tongue#1", now + 700.0, 5.0)
-    checker.expect(
-        board.is_cooling_down("s1", "sharp_tongue#1", now + 702.0),
-        "冷却期内同一条规则不再加分",
-    )
-    checker.expect(
-        not board.is_cooling_down("s1", "sharp_tongue#1", now + 706.0),
-        "冷却结束后规则恢复可用",
-    )
-
-    # 激活与到期
     board.activate("s1", "sharp_tongue", now, 2.0)
     checker.expect(
-        board.active_persona("s1", now + 60.0)[0] == "sharp_tongue",
-        "激活后 1 分钟内人格仍然生效",
+        board.active_persona("s1", now + 60.0)[0] == "sharp_tongue", "激活后 1 分钟内人格仍然生效"
     )
     checker.expect_close(board.remaining_seconds("s1", now + 60.0), 60.0, "剩余时间按到期时间计算", tolerance=0.5)
     active_persona_id, expired_persona_id = board.active_persona("s1", now + 121.0)
     checker.expect(
-        active_persona_id == "" and expired_persona_id == "sharp_tongue",
-        "到期后自动失效并报告到期人格",
+        active_persona_id == "" and expired_persona_id == "sharp_tongue", "到期后自动失效并报告到期人格"
     )
 
-    # 其他人格清零
-    board.add_gain("s2", "sharp_tongue", 10.0, now)
-    board.add_gain("s2", "sweet", 8.0, now)
     board.clear_scores("s2")
-    checker.expect_close(board.effective_score("s2", "sharp_tongue", now), 0.0, "清零其他人格分数（A）")
-    checker.expect_close(board.effective_score("s2", "sweet", now), 0.0, "清零其他人格分数（B）")
+    checker.expect_close(board.effective_score("s2", "sharp_tongue", now), 0.0, "清零人格分数（A）")
+    checker.expect_close(board.effective_score("s2", "sweet", now), 0.0, "清零人格分数（B）")
 
-    # 落盘往返
     board.activate("s3", "sweet", now, 5.0)
     board.add_gain("s3", "sweet", 12.0, now)
+    checker.expect(board.judgement_ready("s3", now, 10.0) is True, "从未判定过时允许判定")
+    board.mark_judged("s3", now)
+    checker.expect(board.judgement_ready("s3", now + 5.0, 10.0) is False, "判定冷却期内不再判定")
+    checker.expect(board.judgement_ready("s3", now + 11.0, 10.0) is True, "冷却结束后恢复判定")
+
     board.save(now)
     reloaded = ScoreBoard(data_dir / "scores.json", max_sessions=10)
     reloaded.configure(decay_per_minute=6.0, grace_minutes=1.0, score_cap=50.0, max_sessions=10)
     reloaded.load()
     checker.expect_close(reloaded.effective_score("s3", "sweet", now + 60.0), 12.0, "重启后分数还在")
-    checker.expect(
-        reloaded.active_persona("s3", now + 60.0)[0] == "sweet",
-        "重启后临时人格与剩余时间还在",
+    checker.expect(reloaded.active_persona("s3", now + 60.0)[0] == "sweet", "重启后临时人格与剩余时间还在")
+
+
+def check_profiles_and_parser(checker: Checker, plugin: Any) -> None:
+    """校验人格档案编译、编号解析与判定提示词。"""
+
+    print("\n[2] 人格档案与判定解析")
+    logger = logging.getLogger("persona_switcher.selfcheck")
+    profiles = build_profiles(plugin.config.personas.personas, logger)
+    checker.expect(list(profiles.keys()) == ["sharp_tongue", "sweet"], "按配置顺序编译出两个人格")
+    sharp = profiles["sharp_tongue"]
+    checker.expect(sharp.judged and sharp.auto_switchable, "有判定条件且加分非 0 的人格参与自动切换")
+    checker.expect("骂" in sharp.criteria, "判定条件原文可用")
+    checker.expect_close(sharp.weight, 12.0, "命中加分读取正确")
+
+    broken = build_profiles(
+        [
+            PersonaEntry(id="", name="没 ID"),
+            PersonaEntry(id="dup", name="第一次", criteria="a", weight=1.0),
+            PersonaEntry(id="dup", name="第二次", criteria="b", weight=1.0),
+            PersonaEntry(id="no_criteria", name="没条件", criteria="", weight=5.0),
+        ],
+        logger,
     )
+    checker.expect(list(broken.keys()) == ["dup", "no_criteria"], "空 ID 与重复 ID 被剔除")
+    checker.expect(not broken["no_criteria"].auto_switchable, "没有判定条件的人格不参与自动切换")
+    checker.expect(len(judged_profiles(broken)) == 1, "参与判定的人格只算有条件的那些")
 
+    checker.expect(parse_verdict("none", 2) == [], "模型回答 none 时不加分")
+    checker.expect(parse_verdict("1", 2) == [0], "模型回答编号 1 命中第一个条件")
+    checker.expect(parse_verdict("1, 2", 2) == [0, 1], "多个编号都算命中")
+    checker.expect(parse_verdict("2", 2) == [1], "编号越界按条件数量裁剪")
+    checker.expect(parse_verdict("3", 2) == [], "超出范围的编号被忽略")
+    checker.expect(parse_verdict("没有满足的条件", 2) == [], "中文否认也算不命中")
 
-def check_triggers(checker: Checker, plugin: PersonaSwitcherPlugin) -> None:
-    """校验触发规则的编译与匹配。"""
-
-    print("\n[2] 触发规则")
-    now = 1_000_000.0
-    personas = compile_personas(plugin.config.personas.personas, logging.getLogger("persona_switcher.selfcheck"))
-    hits = match_message(personas, "你个智障", is_mention=False)
-    checker.expect(
-        [hit.persona_id for hit in hits] == ["sharp_tongue"],
-        "骂人话命中嘴臭人格的大权重规则",
-        f"实际命中 {[hit.persona_id for hit in hits]}",
+    prompt = build_judge_prompt(
+        bot_name="麦麦",
+        criteria_list=["对方在骂麦麦", "对方在夸麦麦"],
+        history=[("群友", "你行不行啊"), ("麦麦", "行"), ("群友", "菜")],
+        latest_is_mention=True,
     )
-    hits = match_message(personas, "麦麦好可爱", is_mention=False)
-    checker.expect(
-        hits == [],
-        "没 @ 麦麦时撒娇规则不命中（require_mention）",
-        f"实际命中 {[hit.persona_id for hit in hits]}",
-    )
-    hits = match_message(personas, "麦麦好可爱", is_mention=True)
-    checker.expect(
-        [hit.persona_id for hit in hits] == ["sweet"],
-        "@ 麦麦后撒娇规则命中",
-        f"实际命中 {[hit.persona_id for hit in hits]}",
-    )
-    checker.expect(now == 1_000_000.0, "匹配过程不依赖时间")
+    checker.expect("1. 对方在骂麦麦" in prompt and "2. 对方在夸麦麦" in prompt, "提示词里带编号清单")
+    checker.expect("最后一条消息@ 了麦麦" in prompt, "提示词里告诉模型是否 @ 了麦麦")
+    checker.expect("群友：菜" in prompt, "提示词里带上最近的对话")
 
 
-async def check_hooks(checker: Checker, plugin: PersonaSwitcherPlugin, data_dir: Path) -> None:
-    """校验三个 Hook 与指令的端到端行为。"""
+async def check_hooks(checker: Checker, plugin: Any) -> None:
+    """校验消息 → 判定 → 加分 → 切换 → 提示词替换 → 指令的端到端行为。"""
 
     print("\n[3] Hook 与指令")
+    apply_evaluation_config(plugin)
     await plugin.on_load()
+    llm: FakeLLMCapability = plugin.ctx.llm
 
-    # (a) 一句话同时命中两条规则时，两条规则的权重都要算进这一条消息
-    await plugin.handle_incoming(message=build_message("你个废物，真蠢"))
-    status = plugin._format_status("session-a", time.time())
-    checker.expect("嘴臭人格：20.0/30" in status, "同一条消息命中多条规则时权重累加", status)
-
-    # (b) 把冷却全部关掉，验证加分累积与阈值切换（避免自检为了等冷却而真的睡几秒）
-    config_data = plugin.get_default_config()
-    for persona in config_data["personas"]["personas"]:
-        persona["cooldown_seconds"] = 0.0
-        for trigger in persona["triggers"]:
-            trigger["cooldown_seconds"] = 0.0
-    plugin.set_plugin_config(config_data)
-    plugin._apply_config()
-
-    for text in ("你有点蠢", "你个废物", "你这人真是垃圾"):
+    # 连发三条消息只判一次（抖动等待把一批消息并成一次调用）
+    llm.responses = ["1"]
+    for text in ("你个废物", "真服了", "有完没完"):
         await plugin.handle_incoming(message=build_message(text))
+    await drain_judgements(plugin)
+    checker.expect(len(llm.prompts) == 1, "一批连发消息只调一次判定", f"实际 {len(llm.prompts)} 次")
+    status = plugin._format_status("session-a", time.time())
+    checker.expect("嘴臭人格：12.0/30" in status, "判定命中后按命中加分累加", status)
+    checker.expect("当前：原人格" in status, "分数没满时仍然使用原人格", status)
+
+    # 再判两次到阈值 → 切换
+    llm.responses = ["1", "1"]
+    await plugin.handle_incoming(message=build_message("你就是个笑话"))
+    await drain_judgements(plugin)
+    await plugin.handle_incoming(message=build_message("继续啊"))
+    await drain_judgements(plugin)
     status = plugin._format_status("session-a", time.time())
     checker.expect("当前：嘴臭人格" in status, "分数顶到阈值后切换人格", status)
     checker.expect("嘴臭人格：0.0/30" in status, "切换时把分数清零", status)
@@ -330,8 +351,7 @@ async def check_hooks(checker: Checker, plugin: PersonaSwitcherPlugin, data_dir:
         checker.expect(BASE_PERSONALITY not in patched_text, "原人格文本已被替换掉", patched_text[:120])
         checker.expect("你行你上" in patched_text, "说话风格也被替换", patched_text[:200])
         checker.expect(
-            patched_items[1]["parts"][0]["text"] == items[1]["parts"][0]["text"],
-            "其他 Item 原样保留",
+            patched_items[1]["parts"][0]["text"] == items[1]["parts"][0]["text"], "其他 Item 原样保留"
         )
         checker.expect(items[0]["parts"][0]["text"] != patched_text, "不修改调用方原本的 Items")
 
@@ -353,13 +373,15 @@ async def check_hooks(checker: Checker, plugin: PersonaSwitcherPlugin, data_dir:
         checker.expect(BASE_BEHAVIOR_STYLE not in planner_text, "规划器行为风格已被替换", planner_text[:200])
         checker.expect("直接怼回去" in planner_text, "规划器里写入了临时人格的行为风格", planner_text[:200])
 
-    # 没触发过骂人的会话不受影响
+    # 生效期间不再判定（省 token）
+    calls_before = len(llm.prompts)
+    await plugin.handle_incoming(message=build_message("还在骂"))
+    await drain_judgements(plugin)
+    checker.expect(len(llm.prompts) == calls_before, "临时人格生效期间不再调模型判定")
+
+    # 没触发过的会话不受影响
     result_other = await plugin.patch_replyer_request(items=build_replyer_items(), session_id="session-other")
-    checker.expect(
-        "modified_kwargs" not in result_other,
-        "其他会话不受该临时人格影响",
-        str(result_other),
-    )
+    checker.expect("modified_kwargs" not in result_other, "其他会话不受该临时人格影响", str(result_other))
 
     # 手动切换与重置
     allowed = await plugin.handle_persona_command(
@@ -370,17 +392,18 @@ async def check_hooks(checker: Checker, plugin: PersonaSwitcherPlugin, data_dir:
     )
     checker.expect("已手动切换到「撒娇人格」" in allowed[1], "本机操作者可以手动切换人格", allowed[1])
     denied = await plugin.handle_persona_command(
-        stream_id="session-a",
-        matched_groups={"action": "重置"},
-        is_local_operator=False,
-        user_id="999",
+        stream_id="session-a", matched_groups={"action": "重置"}, is_local_operator=False, user_id="999"
     )
     checker.expect("只有管理员" in denied[1], "普通用户不能重置", denied[1])
-    reset = await plugin.handle_persona_command(
+    unknown = await plugin.handle_persona_command(
         stream_id="session-a",
-        matched_groups={"action": "重置"},
+        matched_groups={"action": "切换", "argument": "不存在"},
         is_local_operator=True,
         user_id="1",
+    )
+    checker.expect("没有找到人格" in unknown[1], "切换到不存在的人格时给出可用列表", unknown[1])
+    reset = await plugin.handle_persona_command(
+        stream_id="session-a", matched_groups={"action": "重置"}, is_local_operator=True, user_id="1"
     )
     checker.expect("已清零本会话的人格分数" in reset[1], "重置会清分并回到原人格", reset[1])
 
@@ -389,58 +412,53 @@ async def check_hooks(checker: Checker, plugin: PersonaSwitcherPlugin, data_dir:
     assert board is not None
     board.activate("session-a", "sharp_tongue", time.time() - 10 * 60.0, 1.0)
     expired_result = await plugin.patch_replyer_request(items=build_replyer_items(), session_id="session-a")
-    checker.expect(
-        "modified_kwargs" not in expired_result,
-        "临时人格到期后不再改写提示词",
-        str(expired_result),
-    )
+    checker.expect("modified_kwargs" not in expired_result, "临时人格到期后不再改写提示词", str(expired_result))
     checker.expect("当前：原人格" in plugin._format_status("session-a", time.time()), "到期后回到原人格")
 
-    # (c) 规则级冷却
-    config_data = plugin.get_default_config()
-    for persona in config_data["personas"]["personas"]:
-        persona["cooldown_seconds"] = 0.0
-    plugin.set_plugin_config(config_data)
-    plugin._apply_config()
-    for _ in range(2):
-        await plugin.handle_incoming(message=build_message("你有点蠢", session_id="session-rule-cd"))
-    status = plugin._format_status("session-rule-cd", time.time())
-    checker.expect("嘴臭人格：6.0/30" in status, "规则冷却内同一条规则只加一次分", status)
 
-    # (d) 人格级冷却：冷却期内换一条规则也不加分（默认人格冷却 2 秒）
-    config_data = plugin.get_default_config()
-    plugin.set_plugin_config(config_data)
-    plugin._apply_config()
-    await plugin.handle_incoming(message=build_message("你有点蠢", session_id="session-persona-cd"))
-    await plugin.handle_incoming(message=build_message("你个废物", session_id="session-persona-cd"))
-    status = plugin._format_status("session-persona-cd", time.time())
-    checker.expect("嘴臭人格：6.0/30" in status, "人格冷却内换规则也不加分", status)
+async def check_throttle_and_failure(checker: Checker, plugin: Any) -> None:
+    """校验判定冷却、抖动合并与模型失败时的行为。"""
 
+    print("\n[4] 判定节流与异常")
+    llm: FakeLLMCapability = plugin.ctx.llm
 
-async def check_llm_judgement(checker: Checker, plugin: PersonaSwitcherPlugin) -> None:
-    """校验可选的模型判定链路（用假 LLM 顶替真实调用）。"""
+    # 抖动等待内连发的多条消息只算一次判定
+    apply_evaluation_config(plugin, debounce_seconds=0.2)
+    llm.responses = ["none"]
+    llm.prompts.clear()
+    for text in ("在吗", "看这个", "算了"):
+        await plugin.handle_incoming(message=build_message(text, session_id="session-debounce"))
+    await drain_judgements(plugin)
+    checker.expect(len(llm.prompts) == 1, "抖动窗口内连发的消息合并成一次判定", f"实际 {len(llm.prompts)} 次")
 
-    print("\n[4] 模型判定")
-    config_data = plugin.get_plugin_config_data()
-    config_data["evaluation"]["enabled"] = True
-    config_data["evaluation"]["cooldown_seconds"] = 0.0
-    plugin.set_plugin_config(config_data)
-    plugin._apply_config()
+    # 冷却期内不再判定，只记下「有更新」
+    apply_evaluation_config(plugin, debounce_seconds=0.0, cooldown_seconds=30.0)
+    llm.responses = ["none"] * 5
+    llm.prompts.clear()
+    await plugin.handle_incoming(message=build_message("第一条", session_id="session-cooldown"))
+    await drain_judgements(plugin)
+    first_calls = len(llm.prompts)
+    for text in ("第二条", "第三条"):
+        await plugin.handle_incoming(message=build_message(text, session_id="session-cooldown"))
+    await asyncio.sleep(0.15)
+    checker.expect(first_calls == 1, "冷却前正常判定一次", f"实际 {first_calls} 次")
+    checker.expect(len(llm.prompts) == 1, "冷却期内不再调模型", f"实际 {len(llm.prompts)} 次")
+    checker.expect("session-cooldown" in plugin._judge_pending, "冷却期内的新消息被记为待判定")
 
-    board = plugin._board
-    assert board is not None
-    board.reset("session-judge")
-    board.mark_judged("session-judge", 0.0)
-    await plugin.handle_incoming(message=build_message("你今天有点怪怪的", session_id="session-judge"))
-    for task in list(plugin._judge_tasks):
-        await task
-    status = plugin._format_status("session-judge", time.time())
-    checker.expect("嘴臭人格：12.0/30" in status, "模型判定命中后按 llm_weight 加分", status)
-    checker.expect(len(plugin.ctx.llm.calls) == 1, "一次判定只调一次模型", f"实际 {len(plugin.ctx.llm.calls)} 次")
+    # 模型调用失败：不炸、不加分
+    apply_evaluation_config(plugin, debounce_seconds=0.0, cooldown_seconds=0.0)
+    llm.responses = [{"success": False, "error": "boom"}]
+    await plugin.handle_incoming(message=build_message("测试失败", session_id="session-fail"))
+    await drain_judgements(plugin)
+    status = plugin._format_status("session-fail", time.time())
+    checker.expect("嘴臭人格：0.0/30" in status, "模型调用失败时不加分", status)
 
-    config_data["evaluation"]["enabled"] = False
-    plugin.set_plugin_config(config_data)
-    plugin._apply_config()
+    # 模型返回空内容：同样不加分
+    llm.responses = [{"success": True, "response": "   "}]
+    await plugin.handle_incoming(message=build_message("测试空回复", session_id="session-empty"))
+    await drain_judgements(plugin)
+    status = plugin._format_status("session-empty", time.time())
+    checker.expect("嘴臭人格：0.0/30" in status, "模型返回空内容时不加分", status)
 
 
 async def main() -> int:
@@ -457,9 +475,10 @@ async def main() -> int:
     plugin.set_plugin_config(plugin.get_default_config())
 
     check_score_board(checker, data_dir)
-    check_triggers(checker, plugin)
-    await check_hooks(checker, plugin, data_dir)
-    await check_llm_judgement(checker, plugin)
+    check_profiles_and_parser(checker, plugin)
+    await check_hooks(checker, plugin)
+    await check_throttle_and_failure(checker, plugin)
+    await plugin.on_unload()
 
     print(f"\n共 {checker.checks} 项检查，失败 {len(checker.failures)} 项")
     for failure in checker.failures:

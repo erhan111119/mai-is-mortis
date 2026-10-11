@@ -18,7 +18,7 @@ import json
 import os
 import time
 
-STATE_FILE_VERSION = 1
+STATE_FILE_VERSION = 2
 """状态文件格式版本，字段结构变化时递增，老文件直接丢弃。"""
 
 STALE_SESSION_SECONDS = 3600.0
@@ -93,11 +93,8 @@ class SessionState:
     active_until: float = 0.0
     """临时人格的到期时间戳。"""
 
-    cooldown_until: Dict[str, float] = field(default_factory=dict)
-    """规则/人格冷却，键为 ``<人格ID>#<规则序号>`` 或 ``<人格ID>#persona``。"""
-
     recent: List[Tuple[str, str]] = field(default_factory=list)
-    """最近的对话，元素为 ``(发言人, 内容)``，只服务于模型判定，不落盘。"""
+    """最近的对话，元素为 ``(发言人, 内容)``，用于模型判定，不落盘。"""
 
     last_judged_at: float = 0.0
     """上一次交给模型判定的时刻。"""
@@ -222,24 +219,8 @@ class ScoreBoard:
             score.clear()
         state.active_persona_id = ""
         state.active_until = 0.0
-        state.cooldown_until.clear()
 
-    # ──── 冷却 ────────────────────────────────────────────────
-
-    def is_cooling_down(self, session_id: str, key: str, now: float) -> bool:
-        """判断某个冷却键是否还在冷却中。"""
-
-        state = self._sessions.get(session_id)
-        if state is None:
-            return False
-        return state.cooldown_until.get(key, 0.0) > now
-
-    def mark_cooldown(self, session_id: str, key: str, now: float, seconds: float) -> None:
-        """记录某个冷却键的到期时间。"""
-
-        if seconds <= 0:
-            return
-        self._state(session_id, now).cooldown_until[key] = now + seconds
+    # ──── 判定冷却 ────────────────────────────────────────────
 
     def judgement_ready(self, session_id: str, now: float, cooldown_seconds: float) -> bool:
         """判断该会话现在是否可以再调一次模型判定。"""
@@ -367,7 +348,6 @@ class ScoreBoard:
             },
             "active_persona_id": state.active_persona_id,
             "active_until": round(state.active_until, 3),
-            "cooldown_until": {key: round(value, 3) for key, value in state.cooldown_until.items()},
         }
 
     @staticmethod
@@ -386,8 +366,5 @@ class ScoreBoard:
                 )
         state.active_persona_id = str(raw_state.get("active_persona_id", "") or "")
         state.active_until = float(raw_state.get("active_until", 0.0) or 0.0)
-        raw_cooldown = raw_state.get("cooldown_until")
-        if isinstance(raw_cooldown, Mapping):
-            state.cooldown_until = {str(key): float(value or 0.0) for key, value in raw_cooldown.items()}
         state.touched_at = time.time()
         return state

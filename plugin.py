@@ -1,15 +1,16 @@
-"""人格切换插件：用一个评分机制让麦麦临时换人格。
+"""人格切换插件：用「模型判定 → 加分 → 满即切换」让麦麦临时换人格。
 
 玩法（默认配置）：
 
-* 有人骂麦麦 → 「嘴臭人格」加分；有人夸麦麦 → 「撒娇人格」加分；
+* 每来一批消息，插件把最近的对话交给模型判定一次：模型按每个人格的「判定条件」回编号；
+* 命中哪个条件，就给对应人格加「命中加分」（例如有人骂麦麦 → 嘴臭人格 +12）；
 * 某个人格分数顶到阈值 → 立刻切到该人格，其他人格分数清零；
 * 该人格维持若干分钟后自动切回原人格；
 * 分数随时间衰减：最后一次加分后的宽限期内不掉，之后每分钟按配置速度掉。
 
-实现上有三处与宿主交互：
+实现上有四处与宿主交互：
 
-1. ``chat.receive.after_process``：每条入站消息按触发规则加分，并做切换判定；
+1. ``chat.receive.after_process``：记录消息、按抖动等待 + 冷却节流地发起模型判定；
 2. ``maisaka.replyer.before_model_request``：临时人格生效时，把系统提示里的人设、
    说话风格段落替换成该人格的版本（规划器请求走 ``maisaka.planner.before_request``）；
 3. ``maisaka.replyer.before_request``：把人格的「额外要求」并进本次回复要求。
@@ -32,15 +33,12 @@ import time
 
 from .switcher.config import PersonaSwitcherConfig
 from .switcher.evaluator import judge_message
+from .switcher.personas import PersonaProfile, build_profiles, judged_profiles
 from .switcher.prompt_patch import BaseTextCache, PersonaTexts, patch_system_items
 from .switcher.state import ScoreBoard
-from .switcher.triggers import CompiledPersona, compile_personas, match_message
 
 STATE_FILE_NAME = "persona_scores.json"
 """分数状态在插件数据目录里的文件名。"""
-
-PERSONA_COOLDOWN_SUFFIX = "#persona"
-"""人格级冷却在账本里的键前缀，避免和 ``<人格ID>#<规则序号>`` 撞车。"""
 
 
 class PersonaSwitcherPlugin(MaiBotPlugin):
@@ -54,10 +52,12 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
 
         super().__init__()
         self._board: Optional[ScoreBoard] = None
-        self._personas: Dict[str, CompiledPersona] = {}
+        self._profiles: Dict[str, PersonaProfile] = {}
         self._persona_order: List[str] = []
         self._base_cache = BaseTextCache()
-        self._judge_tasks: set[asyncio.Task[Any]] = set()
+        self._judge_tasks: Dict[str, asyncio.Task[Any]] = {}
+        self._judge_pending: set[str] = set()
+        self._last_mention: Dict[str, bool] = {}
         self._last_save_at = 0.0
 
     # ──── 生命周期 ────────────────────────────────────────────
@@ -72,10 +72,11 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
         self._board = board
         self._apply_config()
         await asyncio.to_thread(board.load)
-        persona_names = "、".join(persona.name for persona in self._personas.values()) or "未配置"
+        persona_names = "、".join(profile.name for profile in self._profiles.values()) or "未配置"
         self.ctx.logger.info(
-            "人格切换插件已加载：人格=%s；衰减 %.1f 分/分钟（宽限 %.1f 分钟）",
+            "人格切换插件已加载：人格=%s；判定模型任务=%s；衰减 %.1f 分/分钟（宽限 %.1f 分钟）",
             persona_names,
+            self.config.evaluation.model_task or "默认",
             self.config.scoring.decay_per_minute,
             self.config.scoring.decay_grace_minutes,
         )
@@ -83,9 +84,10 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
     async def on_unload(self) -> None:
         """取消后台判定并落盘分数状态。"""
 
-        for task in list(self._judge_tasks):
+        for task in list(self._judge_tasks.values()):
             task.cancel()
         self._judge_tasks.clear()
+        self._judge_pending.clear()
         await self._save_state(time.time(), force=True)
         self.ctx.logger.info("人格切换插件已卸载")
 
@@ -100,7 +102,7 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
 
         if scope == "self":
             self._apply_config()
-            persona_names = "、".join(persona.name for persona in self._personas.values()) or "未配置"
+            persona_names = "、".join(profile.name for profile in self._profiles.values()) or "未配置"
             self.ctx.logger.info("人格切换插件配置已更新：人格=%s（版本 %s）", persona_names, version)
             return
         if scope == "bot":
@@ -113,8 +115,8 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
         """把最新配置编译成运行时可用的结构。"""
 
         config = self.config
-        self._personas = compile_personas(config.personas.personas, self.ctx.logger)
-        self._persona_order = list(self._personas.keys())
+        self._profiles = build_profiles(config.personas.personas, self.ctx.logger)
+        self._persona_order = list(self._profiles.keys())
         if self._board is not None:
             self._board.configure(
                 decay_per_minute=config.scoring.decay_per_minute,
@@ -123,18 +125,18 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
                 max_sessions=config.scoring.max_sessions,
             )
 
-    # ──── 加分与切换 ──────────────────────────────────────────
+    # ──── 入站消息与判定 ──────────────────────────────────────
 
     @HookHandler(
         "chat.receive.after_process",
         name="persona_switcher_incoming",
-        description="按触发规则给人格加分，分数顶到阈值就临时切换人格。",
+        description="记录消息并在合适的时机发起模型判定，命中就给人格加分。",
         mode=HookMode.BLOCKING,
         order=HookOrder.NORMAL,
         error_policy=ErrorPolicy.SKIP,
     )
     async def handle_incoming(self, message: Any = None, **kwargs: Any) -> Dict[str, Any]:
-        """处理入站消息：加分、判定切换、必要时交给模型判定。"""
+        """处理入站消息：记账、必要时发起判定。"""
 
         config = self.config
         board = self._board
@@ -145,12 +147,13 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
         session_id = str(message.get("session_id") or "")
         if not session_id:
             return {"action": "continue"}
-        if self.config.switching.log_incoming:
+        is_mention = self._is_mention(message)
+        if config.switching.log_incoming:
             self.ctx.logger.debug(
                 "人格切换：收到消息 session=%s 文本长度=%d 是否@=%s 是否指令=%s 文本=%.40s",
                 session_id[:8],
                 len(text),
-                self._is_mention(message),
+                is_mention,
                 bool(message.get("is_command")),
                 text,
             )
@@ -159,14 +162,106 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
 
         now = time.time()
         board.push_recent(session_id, self._speaker_name(message), text, config.evaluation.recent_message_count)
-        if not self._scoring_paused(session_id, now):
-            hits = match_message(self._personas, text, is_mention=self._is_mention(message))
-            if hits:
-                self._apply_hits(session_id, hits, now, text)
-            self._maybe_switch(session_id, now)
-        self._schedule_judgement(session_id, text, now)
+        self._last_mention[session_id] = is_mention
+        if len(text) >= max(0, config.evaluation.min_text_length):
+            self._schedule_judgement(session_id)
         await self._save_state(now)
         return {"action": "continue"}
+
+    def _schedule_judgement(self, session_id: str) -> None:
+        """按抖动等待与冷却节流地安排一次模型判定。
+
+        同一个会话同一时刻只会有一个判定任务：期间到达的新消息只标记「有更新」，
+        等这一轮判完（并等过冷却）再补一轮，避免热聊时每条消息都调一次模型。
+        """
+
+        config = self.config
+        board = self._board
+        if board is None or not config.evaluation.enabled:
+            return
+        if not judged_profiles(self._profiles):
+            return
+        now = time.time()
+        if self._scoring_paused(session_id, now):
+            return
+        running_task = self._judge_tasks.get(session_id)
+        if running_task is not None and not running_task.done():
+            self._judge_pending.add(session_id)
+            return
+        if not board.judgement_ready(session_id, now, config.evaluation.cooldown_seconds):
+            self._judge_pending.add(session_id)
+            return
+        task = asyncio.create_task(self._run_judgement(session_id))
+        self._judge_tasks[session_id] = task
+        task.add_done_callback(lambda finished, sid=session_id: self._on_judgement_done(sid, finished))
+
+    def _on_judgement_done(self, session_id: str, task: asyncio.Task[Any]) -> None:
+        """判定任务结束后的清理：有积压消息就再排一轮。"""
+
+        if self._judge_tasks.get(session_id) is task:
+            self._judge_tasks.pop(session_id, None)
+        if task.cancelled():
+            return
+        if session_id in self._judge_pending:
+            self._judge_pending.discard(session_id)
+            self._schedule_judgement(session_id)
+
+    async def _run_judgement(self, session_id: str) -> None:
+        """抖动等待后做一次判定，命中就加分并重新做切换判定。"""
+
+        evaluation = self.config.evaluation
+        await asyncio.sleep(max(0.0, evaluation.debounce_seconds))
+
+        board = self._board
+        if board is None:
+            return
+        now = time.time()
+        if self._scoring_paused(session_id, now):
+            return
+        targets = judged_profiles(self._profiles)
+        if not targets:
+            return
+        history = board.recent(session_id)
+        if not history:
+            return
+
+        board.mark_judged(session_id, now)
+        base = await self._base_cache.get(self.ctx)
+        try:
+            outcome = await judge_message(
+                self.ctx,
+                bot_name=base.bot_name,
+                criteria_list=[profile.criteria for profile in targets],
+                history=history,
+                latest_is_mention=self._last_mention.get(session_id, False),
+                model_task=evaluation.model_task,
+                temperature=evaluation.temperature,
+                max_tokens=evaluation.max_response_tokens,
+            )
+        except Exception as exc:
+            self.ctx.logger.warning(f"人格模型判定失败，本轮不加分: {exc}")
+            return
+        if evaluation.log_raw_response:
+            self.ctx.logger.debug("人格切换：判定原始输出=%s", outcome.raw_response[:120])
+        if not outcome.matched_indexes:
+            return
+
+        now = time.time()
+        if self._scoring_paused(session_id, now):
+            return
+        for index in outcome.matched_indexes:
+            profile = targets[index]
+            score = board.add_gain(session_id, profile.persona_id, profile.weight, now)
+            if self.config.switching.log_gain:
+                self.ctx.logger.info(
+                    "人格判定命中：%s +%.1f → %.1f/%.1f",
+                    profile.name,
+                    profile.weight,
+                    score,
+                    profile.threshold,
+                )
+        self._maybe_switch(session_id, now)
+        await self._save_state(now)
 
     def _scoring_paused(self, session_id: str, now: float) -> bool:
         """判断当前是否暂停计分（临时人格生效中且配置为不累计）。"""
@@ -179,63 +274,19 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
             return False
         return not self.config.switching.accumulate_while_active
 
-    def _apply_hits(
-        self, session_id: str, hits: Sequence[Any], now: float, text: str
-    ) -> Dict[str, float]:
-        """按冷却规则把命中换算成加分，返回 ``人格 ID → 加分后分数``。"""
-
-        board = self._board
-        if board is None:
-            return {}
-        # 先按规则级冷却筛出本条消息的有效命中：同一句话可以同时命中多条规则
-        matched: Dict[str, float] = {}
-        for hit in hits:
-            persona = self._personas.get(hit.persona_id)
-            if persona is None:
-                continue
-            if hit.cooldown_seconds > 0 and board.is_cooling_down(session_id, hit.rule_key, now):
-                continue
-            matched[hit.persona_id] = matched.get(hit.persona_id, 0.0) + hit.weight
-            if hit.cooldown_seconds > 0:
-                board.mark_cooldown(session_id, hit.rule_key, now, hit.cooldown_seconds)
-
-        # 再按人格级冷却决定该人格本条消息算不算分：人格冷却只拦「下一条消息」，
-        # 不会把同一句话里的多条规则拆开
-        updated: Dict[str, float] = {}
-        for persona_id, gain in matched.items():
-            persona = self._personas[persona_id]
-            persona_cooldown_key = f"{persona_id}{PERSONA_COOLDOWN_SUFFIX}"
-            if persona.cooldown_seconds > 0 and board.is_cooling_down(session_id, persona_cooldown_key, now):
-                continue
-            capped_gain = min(gain, persona.max_gain_per_message) if persona.max_gain_per_message > 0 else gain
-            score = board.add_gain(session_id, persona_id, capped_gain, now)
-            updated[persona_id] = score
-            if persona.cooldown_seconds > 0:
-                board.mark_cooldown(session_id, persona_cooldown_key, now, persona.cooldown_seconds)
-            if self.config.switching.log_gain:
-                self.ctx.logger.info(
-                    "人格加分：%s +%.1f → %.1f/%.1f（触发内容：%s）",
-                    persona.name,
-                    capped_gain,
-                    score,
-                    persona.threshold,
-                    text[:40],
-                )
-        return updated
-
-    def _maybe_switch(self, session_id: str, now: float) -> Optional[CompiledPersona]:
+    def _maybe_switch(self, session_id: str, now: float) -> Optional[PersonaProfile]:
         """分数顶到阈值就切换人格，返回本次激活的人格。"""
 
         board = self._board
         if board is None:
             return None
-        candidates: List[Tuple[float, float, CompiledPersona]] = []
-        for persona in self._personas.values():
-            if not persona.auto_switchable:
+        candidates: List[Tuple[float, float, PersonaProfile]] = []
+        for profile in self._profiles.values():
+            if not profile.auto_switchable:
                 continue
-            score = board.effective_score(session_id, persona.persona_id, now)
-            if score >= persona.threshold:
-                candidates.append((score / persona.threshold, score, persona))
+            score = board.effective_score(session_id, profile.persona_id, now)
+            if score >= profile.threshold:
+                candidates.append((score / profile.threshold, score, profile))
         if not candidates:
             return None
         candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
@@ -254,7 +305,7 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
         )
         return chosen
 
-    def _active_persona(self, session_id: str) -> Optional[CompiledPersona]:
+    def _active_persona(self, session_id: str) -> Optional[PersonaProfile]:
         """返回该会话当前生效的临时人格；到期时顺手记一条日志。"""
 
         board = self._board
@@ -262,14 +313,14 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
             return None
         active_persona_id, expired_persona_id = board.active_persona(session_id, time.time())
         if expired_persona_id:
-            expired = self._personas.get(expired_persona_id)
+            expired = self._profiles.get(expired_persona_id)
             self.ctx.logger.info(
                 "临时人格「%s」已到期，恢复原人格",
                 expired.name if expired is not None else expired_persona_id,
             )
         if not active_persona_id:
             return None
-        return self._personas.get(active_persona_id)
+        return self._profiles.get(active_persona_id)
 
     # ──── 提示词改写 ──────────────────────────────────────────
 
@@ -336,7 +387,7 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
         persona = self._active_persona(str(kwargs.get("session_id") or ""))
         if persona is None:
             return {"action": "continue"}
-        requirement = persona.entry.extra_prompt.strip()
+        requirement = persona.extra_prompt
         if not requirement:
             return {"action": "continue"}
         existing = str(kwargs.get("extra_prompt") or "").strip()
@@ -344,89 +395,15 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
         return {"action": "continue", "modified_kwargs": {**kwargs, "extra_prompt": merged}}
 
     @staticmethod
-    def _persona_texts(persona: CompiledPersona) -> PersonaTexts:
+    def _persona_texts(persona: PersonaProfile) -> PersonaTexts:
         """取出临时人格要写入提示词的文本。"""
 
         return PersonaTexts(
             name=persona.name,
-            personality=persona.entry.personality.strip(),
-            reply_style=persona.entry.reply_style.strip(),
-            behavior_style=persona.entry.behavior_style.strip(),
+            personality=persona.personality,
+            reply_style=persona.reply_style,
+            behavior_style=persona.behavior_style,
         )
-
-    # ──── 模型判定 ────────────────────────────────────────────
-
-    def _schedule_judgement(self, session_id: str, text: str, now: float) -> None:
-        """需要时把最近的对话交给模型判定一次。"""
-
-        config = self.config
-        evaluation = config.evaluation
-        board = self._board
-        if board is None or not evaluation.enabled:
-            return
-        targets = [
-            persona
-            for persona in self._personas.values()
-            if persona.llm_criteria and persona.llm_weight > 0 and persona.auto_switchable
-        ]
-        if not targets:
-            return
-        if len(text) < max(0, evaluation.min_text_length):
-            return
-        if self._scoring_paused(session_id, now):
-            return
-        if not board.judgement_ready(session_id, now, evaluation.cooldown_seconds):
-            return
-        board.mark_judged(session_id, now)
-        task = asyncio.create_task(self._run_judgement(session_id, targets, board.recent(session_id), text))
-        self._judge_tasks.add(task)
-        task.add_done_callback(self._judge_tasks.discard)
-
-    async def _run_judgement(
-        self,
-        session_id: str,
-        targets: Sequence[CompiledPersona],
-        history: Sequence[Tuple[str, str]],
-        text: str,
-    ) -> None:
-        """后台执行模型判定，命中就加分并重新做切换判定。"""
-
-        evaluation = self.config.evaluation
-        base = await self._base_cache.get(self.ctx)
-        try:
-            matched_indexes = await judge_message(
-                self.ctx,
-                bot_name=base.bot_name,
-                criteria_list=[persona.llm_criteria for persona in targets],
-                history=history,
-                latest_text=text,
-                model_task=evaluation.model_task,
-                temperature=evaluation.temperature,
-                max_tokens=evaluation.max_response_tokens,
-            )
-        except Exception as exc:
-            self.ctx.logger.warning(f"人格模型判定失败，本轮跳过: {exc}")
-            return
-        if not matched_indexes:
-            return
-        board = self._board
-        if board is None:
-            return
-        now = time.time()
-        if self._scoring_paused(session_id, now):
-            return
-        for index in matched_indexes:
-            persona = targets[index]
-            score = board.add_gain(session_id, persona.persona_id, persona.llm_weight, now)
-            self.ctx.logger.info(
-                "人格模型判定命中：%s +%.1f → %.1f/%.1f",
-                persona.name,
-                persona.llm_weight,
-                score,
-                persona.threshold,
-            )
-        self._maybe_switch(session_id, now)
-        await self._save_state(now)
 
     # ──── 指令 ────────────────────────────────────────────────
 
@@ -464,7 +441,7 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
     def _manual_switch(self, session_id: str, persona_id: str, now: float) -> str:
         """按指令手动激活人格。"""
 
-        persona = self._personas.get(persona_id)
+        persona = self._profiles.get(persona_id)
         if persona is None:
             available = "、".join(self._persona_order) or "（没有配置任何人格）"
             return f"没有找到人格「{persona_id or '空'}」。可用的人格 ID：{available}"
@@ -483,7 +460,7 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
         active_persona_id, _ = board.active_persona(session_id, now)
         lines: List[str] = ["【人格状态】"]
         if active_persona_id:
-            persona = self._personas.get(active_persona_id)
+            persona = self._profiles.get(active_persona_id)
             remaining = board.remaining_seconds(session_id, now)
             lines.append(
                 f"当前：{persona.name if persona is not None else active_persona_id}（剩余 {self._format_duration(remaining)}）"
@@ -495,7 +472,7 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
             return "\n".join(lines)
         lines.append("分数：")
         for persona_id, score in board.snapshot(session_id, now, self._persona_order):
-            persona = self._personas[persona_id]
+            persona = self._profiles[persona_id]
             if not persona.auto_switchable:
                 lines.append(f"- {persona.name}：{score:.1f}（不参与自动切换）")
                 continue
