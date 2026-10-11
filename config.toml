@@ -14,6 +14,7 @@ accumulate_while_active = false
 inject_planner = true
 save_interval_seconds = 20.0
 log_gain = true
+log_incoming = true
 
 [evaluation]
 enabled = false

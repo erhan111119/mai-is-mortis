@@ -206,6 +206,11 @@ class SwitchingSection(PluginConfigBase):
         description="每次加分都写一条 INFO 日志，方便对着日志调阈值和权重",
         json_schema_extra={"label": "记录加分日志"},
     )
+    log_incoming: bool = Field(
+        default=True,
+        description="每条入站消息写一条 DEBUG 日志（会话、长度、是否 @），用来确认插件确实看到了消息",
+        json_schema_extra={"label": "记录入站消息日志"},
+    )
 
 
 class EvaluationSection(PluginConfigBase):

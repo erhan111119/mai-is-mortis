@@ -143,7 +143,18 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
 
         text = str(message.get("processed_plain_text") or "").strip()
         session_id = str(message.get("session_id") or "")
-        if not text or not session_id or bool(message.get("is_command")):
+        if not session_id:
+            return {"action": "continue"}
+        if self.config.switching.log_incoming:
+            self.ctx.logger.debug(
+                "人格切换：收到消息 session=%s 文本长度=%d 是否@=%s 是否指令=%s 文本=%.40s",
+                session_id[:8],
+                len(text),
+                self._is_mention(message),
+                bool(message.get("is_command")),
+                text,
+            )
+        if not text or bool(message.get("is_command")):
             return {"action": "continue"}
 
         now = time.time()
