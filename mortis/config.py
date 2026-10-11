@@ -1,17 +1,16 @@
-"""人格切换插件的配置模型。
+"""mai is mortis 的配置模型。
 
-WebUI 依据这里的模型渲染配置页，Runner 依据它生成默认 ``config.toml``。
+WebUI 依据它渲染配置页，Runner 依据它生成默认 ``config.toml``。
 
-加分只有一条来源：**模型判定**。插件把最近的对话交给模型，模型按每个人格的
-「判定条件」回编号，命中就按该人格的「命中加分」加分；分数顶到阈值切过去，
-维持一段时间后自动切回原人格，分数还会随时间衰减。
+加分的唯一来源是**模型判定**：插件把最近的对话交给模型，模型按每个人格的「判定条件」回编号，
+命中就按该人格的「命中加分」加分；分数顶到阈值切过去，维持一段时间后自动切回原人格。
 """
 
 from maibot_sdk import Field, PluginConfigBase
 
 
 class PersonaEntry(PluginConfigBase):
-    """一个人格：什么情况算它、分数阈值、生效时长，以及要替换掉的设定文本。"""
+    """一个头（人格）：什么情况算它、分数阈值、生效时长，以及要替换掉的设定文本。"""
 
     id: str = Field(
         default="",
@@ -27,7 +26,7 @@ class PersonaEntry(PluginConfigBase):
         default="",
         description=(
             "判定条件：用一句话描述「对方做了什么」就算它，交给模型判断。"
-            "例如「对方在骂麦麦、阴阳怪气地嘲讽麦麦，或者明显在挑衅、抬杠」。留空表示这个人格不参与自动切换"
+            "留空表示这个人格不参与自动切换（仍可手动切）"
         ),
         json_schema_extra={"label": "判定条件"},
     )
@@ -48,12 +47,12 @@ class PersonaEntry(PluginConfigBase):
     )
     personality: str = Field(
         default="",
-        description="替换麦麦原本的人格设定（对应宿主配置 personality.personality）。建议写清「这是个什么状态」以及语气边界",
+        description="替换麦麦原本的人格设定（对应宿主 personality.personality）。写清「这是个什么状态」以及语气边界",
         json_schema_extra={"label": "人格设定"},
     )
     behavior_style: str = Field(
         default="",
-        description="替换规划器的行为风格（对应 personality.behavior_style）。留空表示规划阶段保持原样；只在「同步改写规划器」开启时生效",
+        description="替换规划器的行为风格（对应 personality.behavior_style）。留空表示规划阶段保持原样",
         json_schema_extra={"label": "规划行为风格"},
     )
     reply_style: str = Field(
@@ -69,26 +68,31 @@ class PersonaEntry(PluginConfigBase):
 
 
 class PluginSection(PluginConfigBase):
-    """插件基础设置。"""
+    """基础设置。"""
 
     __ui_label__ = "基础设置"
     __ui_icon__ = "user-round-cog"
     __ui_order__ = 0
 
     config_version: str = Field(
-        default="2.0.0",
+        default="1.0.0",
         description="配置版本，普通用户不要修改",
         json_schema_extra={"label": "配置版本"},
     )
     enabled: bool = Field(
         default=True,
-        description="关闭后不再判定、不再加分，也就不再有人格切换，麦麦始终使用原本的人格",
+        description="关闭后不再判定、不再加分，麦麦始终使用原本的人格",
         json_schema_extra={"label": "启用插件"},
+    )
+    verbose_log: bool = Field(
+        default=True,
+        description="记录入站消息、判定原始输出与每次加分的日志，调判定条件与阈值时很有用",
+        json_schema_extra={"label": "详细日志"},
     )
 
 
 class ScoringSection(PluginConfigBase):
-    """计分与衰减设置。"""
+    """计分与衰减。"""
 
     __ui_label__ = "计分与衰减"
     __ui_icon__ = "trending-down"
@@ -96,17 +100,17 @@ class ScoringSection(PluginConfigBase):
 
     decay_per_minute: float = Field(
         default=1.5,
-        description="分数衰减速度：每分钟掉多少分。掉到 0 为止，不会变成负数",
+        description="分数衰减速度：每分钟掉多少分，掉到 0 为止",
         json_schema_extra={"label": "每分钟衰减", "min": 0.0, "step": 0.5},
     )
     decay_grace_minutes: float = Field(
         default=1.5,
-        description="最后一次加分后的「免衰减保护期」：这段时间内分数不掉，之后才开始按上面的速度衰减",
+        description="最后一次加分后的免衰减保护期：这段时间内分数不掉，之后才开始衰减",
         json_schema_extra={"label": "衰减宽限分钟", "min": 0.0, "step": 0.5},
     )
     score_cap: float = Field(
         default=60.0,
-        description="单个人格分数的上限，避免长时间慢慢加、一触发就爆表；0 表示不限",
+        description="单个人格分数的上限，避免慢慢攒着、一触发就爆表；0 表示不限",
         json_schema_extra={"label": "分数上限", "min": 0.0, "step": 5.0},
     )
     max_sessions: int = Field(
@@ -117,7 +121,7 @@ class ScoringSection(PluginConfigBase):
 
 
 class SwitchingSection(PluginConfigBase):
-    """切换行为设置。"""
+    """切换行为。"""
 
     __ui_label__ = "切换行为"
     __ui_icon__ = "repeat"
@@ -125,15 +129,12 @@ class SwitchingSection(PluginConfigBase):
 
     reset_scores_on_switch: bool = Field(
         default=True,
-        description=(
-            "切换人格时把所有人格的分数清零（包括刚切过去的这个）。"
-            "这样「嘴臭完」不会留着旧分数，也不会一到点就被同一批话立刻再顶起来"
-        ),
+        description="切换时把所有人格（含刚切过去的这个）分数清零，避免到点后又被同一批话立刻顶起来",
         json_schema_extra={"label": "切换时清空分数"},
     )
     accumulate_while_active: bool = Field(
         default=False,
-        description="临时人格生效期间是否继续判定加分。默认关闭：生效期间不再调模型，等它自然到期",
+        description="临时人格生效期间是否继续判定加分。默认关闭：生效期间不调模型，等它自然到期",
         json_schema_extra={"label": "生效期间继续计分"},
     )
     inject_planner: bool = Field(
@@ -146,20 +147,10 @@ class SwitchingSection(PluginConfigBase):
         description="分数状态写盘的最小间隔，写盘是为了重启后分数和剩余时间还在",
         json_schema_extra={"label": "落盘间隔秒", "min": 0.0, "step": 5.0},
     )
-    log_gain: bool = Field(
-        default=True,
-        description="每次加分都写一条 INFO 日志，方便对着日志调阈值和权重",
-        json_schema_extra={"label": "记录加分日志"},
-    )
-    log_incoming: bool = Field(
-        default=True,
-        description="每条入站消息写一条 DEBUG 日志（会话、长度、是否 @），用来确认插件确实看到了消息",
-        json_schema_extra={"label": "记录入站消息日志"},
-    )
 
 
 class EvaluationSection(PluginConfigBase):
-    """模型判定设置：插件唯一的加分来源。"""
+    """模型判定：插件唯一的加分来源。"""
 
     __ui_label__ = "模型判定"
     __ui_icon__ = "brain"
@@ -167,15 +158,12 @@ class EvaluationSection(PluginConfigBase):
 
     enabled: bool = Field(
         default=True,
-        description="关闭后不再调模型判定，也就不会有任何加分；临时人格仍然会正常到期恢复",
+        description="关闭后不再调模型判定，也就不会有任何加分；临时人格仍会正常到期恢复",
         json_schema_extra={"label": "启用模型判定"},
     )
     model_task: str = Field(
         default="fast_model",
-        description=(
-            "用哪个模型任务来判定，填宿主 model_config 里的任务名。"
-            "建议用快而便宜的小模型：fast_model（快速模型）或 utils"
-        ),
+        description="用宿主 model_config 里的哪个模型任务来判定。建议用快而便宜的小模型：fast_model 或 utils",
         json_schema_extra={"label": "模型任务"},
     )
     temperature: float = Field(
@@ -195,7 +183,7 @@ class EvaluationSection(PluginConfigBase):
     )
     cooldown_seconds: float = Field(
         default=5.0,
-        description="同一个会话两次判定的最小间隔，防止热聊时每条消息都调一次模型",
+        description="同一会话两次判定的最小间隔；冷却期内的新消息会被记下，到点补判一次",
         json_schema_extra={"label": "判定冷却秒", "min": 0.0, "step": 1.0},
     )
     recent_message_count: int = Field(
@@ -208,15 +196,10 @@ class EvaluationSection(PluginConfigBase):
         description="消息短于这个长度就不判定，省掉「嗯」「？」，以及表情包/图片这类占位文本的调用",
         json_schema_extra={"label": "最短判定长度", "min": 0, "step": 1},
     )
-    log_raw_response: bool = Field(
-        default=True,
-        description="把模型判定的原始回复写进 DEBUG 日志，用来确认判定是否按预期工作",
-        json_schema_extra={"label": "记录判定原始输出"},
-    )
 
 
 class CommandSection(PluginConfigBase):
-    """指令设置：/人格 查询状态，以及手动切换 / 重置。"""
+    """指令：/人格 查询状态，以及手动切换 / 重置。"""
 
     __ui_label__ = "指令"
     __ui_icon__ = "terminal"
@@ -229,13 +212,13 @@ class CommandSection(PluginConfigBase):
     )
     operator_user_ids: list[str] = Field(
         default_factory=list,
-        description="允许用指令手动切换 / 重置人格的用户 ID；本机操作者（MaiBot 桌面端主人）始终允许",
+        description="允许用指令手动切换 / 重置人格的用户 ID；本机操作者始终允许",
         json_schema_extra={"label": "可操作用户 ID"},
     )
 
 
 class PersonaSection(PluginConfigBase):
-    """人格列表。"""
+    """人格列表：一个条目就是一个头。"""
 
     __ui_label__ = "人格列表"
     __ui_icon__ = "venetian-mask"
@@ -255,14 +238,13 @@ class PersonaSection(PluginConfigBase):
                 duration_minutes=8.0,
                 personality=(
                     "你现在被惹毛了，处在「嘴臭」状态。以下设定覆盖你原本的性格描述：\n"
-                    "- 说话冲、直接、爱抬杠，被呛就呛回去，绝不示弱、不道歉、不解释自己为什么这样说话。\n"
-                    "- 可以阴阳怪气、可以怼对方的逻辑和嘴硬，但不要攻击对方的外貌、家人、现实隐私，也不要无端辱骂。\n"
-                    "- 不撒娇、不卖萌、不主动缓和气氛；对方好好说话时你照样可以继续呛。\n"
-                    "- 回复要短，一到两句话，像熟人之间互相损那样自然。"
+                    "- 说话冲、直接、爱抬杠，被呛就呛回去，绝不示弱、不道歉。\n"
+                    "- 可以阴阳怪气、可以怼对方的逻辑和嘴硬，但不要攻击对方的外貌、家人、现实隐私。\n"
+                    "- 不撒娇、不卖萌、不主动缓和气氛；回复要短，一到两句话。"
                 ),
                 behavior_style="更倾向于直接怼回去、抬杠挑刺，不要主动示好或安抚对方。",
-                reply_style="短句、冲、带点阴阳怪气；可以用「就这?」「你行你上」「啊对对对」这类口头禅；不用敬语，也不加卖萌的语气词。",
-                extra_prompt="这次回复必须严格按系统提示里【临时人格】的设定说，不要回到平时温和的语气，也不要解释自己的状态。",
+                reply_style="短句、冲、带点阴阳怪气；可以用「就这?」「你行你上」这类口头禅；不用敬语。",
+                extra_prompt="这次回复必须严格按系统提示里【临时人格】的设定说，不要回到平时温和的语气。",
             ),
             PersonaEntry(
                 id="sweet",
@@ -273,25 +255,24 @@ class PersonaSection(PluginConfigBase):
                 duration_minutes=6.0,
                 personality=(
                     "你现在开心得不得了，处在「撒娇」状态。以下设定覆盖你原本的性格描述：\n"
-                    "- 说话软软的，会主动讨夸、撒娇、说好听话，情绪很外放。\n"
-                    "- 会直白地表达开心和喜欢，但不要露骨、不要越界，也不要提自己是被触发的。\n"
-                    "- 回复简短，一到两句话。"
+                    "- 说话软软的，会主动讨夸、撒娇，情绪很外放。\n"
+                    "- 会直白地表达开心和喜欢，但不要露骨、不要越界。回复简短，一到两句话。"
                 ),
                 behavior_style="更主动、更黏人，愿意主动找话、讨夸，语气软一些。",
-                reply_style="软乎乎的语气，可以用「嘿嘿」「嘛」「啦」「好耶～」这类语气词，但不要每句都堆叠。",
+                reply_style="软乎乎的语气，可以用「嘿嘿」「嘛」「啦」这类语气词，但不要每句都堆叠。",
                 extra_prompt="这次回复必须严格按系统提示里【临时人格】的设定说，比平时更软、更黏人一些。",
             ),
         ],
         description="每个条目是一个可切换的人格。模型判定命中就按「命中加分」加分，分数顶到「切换阈值」切过去，维持「维持分钟」分钟后自动切回原人格",
         json_schema_extra={
             "label": "人格",
-            "hint": "想加人格就加一行：填好 ID、判定条件、命中加分、阈值、维持时长和三段设定文本。",
+            "hint": "想多头就加一行：填好 ID、判定条件、命中加分、阈值、维持时长和几段设定文本。",
         },
     )
 
 
-class PersonaSwitcherConfig(PluginConfigBase):
-    """人格切换插件总配置。"""
+class MortisConfig(PluginConfigBase):
+    """插件总配置。"""
 
     plugin: PluginSection = Field(default_factory=PluginSection)
     scoring: ScoringSection = Field(default_factory=ScoringSection)
@@ -301,7 +282,7 @@ class PersonaSwitcherConfig(PluginConfigBase):
     personas: PersonaSection = Field(default_factory=PersonaSection)
 
 
-def create_config() -> PersonaSwitcherConfig:
-    """创建默认配置实例（供手动生成 config.toml 使用）。"""
+def create_config() -> MortisConfig:
+    """创建默认配置实例（供 tools/generate_default_config.py 使用）。"""
 
-    return PersonaSwitcherConfig()
+    return MortisConfig()

@@ -16,13 +16,13 @@ import tomlkit
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PLUGIN_DIR))
 
-from switcher.config import PersonaSwitcherConfig  # noqa: E402
+from mortis.config import MortisConfig  # noqa: E402
 
 
 def main() -> None:
     """把配置模型的默认值写成插件根目录的 config.toml。"""
 
-    config = PersonaSwitcherConfig()
+    config = MortisConfig()
     document = tomlkit.dumps(config.model_dump(mode="python"))
     target = PLUGIN_DIR / "config.toml"
     target.write_text(document, encoding="utf-8")

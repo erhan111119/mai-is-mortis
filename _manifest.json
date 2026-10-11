@@ -1,20 +1,20 @@
 {
   "manifest_version": 2,
-  "id": "local.persona-switcher",
-  "version": "2.0.0",
-  "name": "人格切换（模型判定打分）",
-  "description": "用评分机制让麦麦临时换人格，加分全部由模型判定：插件把最近的对话交给模型，按每个人格的一句话判定条件决定谁加分（骂麦麦→嘴臭人格+12，夸麦麦→撒娇人格+10）；某个人格分数顶到阈值立刻切过去，其他人格分数清零，维持一段时间后自动切回原人格，分数还会随时间衰减。判定条件、命中加分、阈值、维持时长、衰减速度全部可在 WebUI 里改，并支持 /人格 查看分数与手动切换。",
+  "id": "github.erhan111119.mai-is-mortis",
+  "version": "1.0.0",
+  "name": "mai is mortis",
+  "description": "麦麦是多首的怪物：被骂就长出一颗嘴臭的头，被夸就长出一颗撒娇的头。加分的唯一来源是模型判定——插件把最近的对话交给模型，按每个人格的一句话判定条件决定谁加分；某个头分数顶到阈值就顶替掉主人格，其他人格分数清零，维持一段时间后自动切回，分数还会随时间衰减。人格、判定条件、阈值、时长全部可在 WebUI 里改，支持 /人格 查看分数与手动切换。",
   "author": {
-    "name": "MaiBot 本地插件",
-    "url": "https://github.com/Mai-with-u"
+    "name": "erhan111119",
+    "url": "https://github.com/erhan111119"
   },
   "license": "MIT",
   "urls": {
-    "repository": "https://github.com/Mai-with-u/MaiBot",
-    "homepage": "https://github.com/Mai-with-u/MaiBot",
-    "documentation": "https://github.com/Mai-with-u/maibot-plugin-sdk/blob/main/docs/guide.md"
+    "repository": "https://github.com/erhan111119/mai-is-mortis",
+    "homepage": "https://github.com/erhan111119/mai-is-mortis",
+    "documentation": "https://github.com/erhan111119/mai-is-mortis/blob/main/README.md",
+    "issues": "https://github.com/erhan111119/mai-is-mortis/issues"
   },
-  "changelog": "CHANGELOG.md",
   "host_application": {
     "min_version": "1.0.0",
     "max_version": "1.99.99"
@@ -23,6 +23,7 @@
     "min_version": "2.10.0",
     "max_version": "2.99.99"
   },
+  "plugin_type": "extension",
   "dependencies": [],
   "capabilities": [
     "config.get",
@@ -33,11 +34,5 @@
     "supported_locales": [
       "zh-CN"
     ]
-  },
-  "display": {
-    "icon": {
-      "type": "lucide",
-      "value": "venetian-mask"
-    }
   }
 }

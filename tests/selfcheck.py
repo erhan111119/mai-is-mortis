@@ -1,7 +1,7 @@
-"""人格切换插件自检脚本（不依赖 pytest，可直接用宿主解释器运行）。
+"""mai is mortis 自检脚本（不依赖 pytest，可直接用宿主解释器运行）。
 
 用法：
-    <MaiBot>/python-env/python.exe plugins/persona-switcher/tests/selfcheck.py
+    <MaiBot>/python-env/python.exe plugins/mai-is-mortis/tests/selfcheck.py
 
 覆盖四段：
 
@@ -25,10 +25,9 @@ from typing import Any, Dict, List, Sequence
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PLUGIN_DIR))
 
-from switcher.config import PersonaEntry  # noqa: E402
-from switcher.evaluator import build_judge_prompt, parse_verdict  # noqa: E402
-from switcher.personas import build_profiles, judged_profiles  # noqa: E402
-from switcher.state import ScoreBoard  # noqa: E402
+from mortis.config import PersonaEntry  # noqa: E402
+from mortis.judge import build_judge_prompt, build_profiles, judged_profiles, parse_verdict  # noqa: E402
+from mortis.state import ScoreBoard  # noqa: E402
 
 
 def load_plugin_class() -> Any:
@@ -41,7 +40,7 @@ def load_plugin_class() -> Any:
         Any: 插件主类。
     """
 
-    module_name = "persona_switcher_plugin_selfcheck"
+    module_name = "mai_is_mortis_plugin_selfcheck"
     spec = importlib.util.spec_from_file_location(
         module_name,
         str(PLUGIN_DIR / "plugin.py"),
@@ -52,10 +51,10 @@ def load_plugin_class() -> Any:
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
-    return module.PersonaSwitcherPlugin
+    return module.MaiIsMortisPlugin
 
 
-PersonaSwitcherPlugin = load_plugin_class()
+MaiIsMortisPlugin = load_plugin_class()
 
 BASE_PERSONALITY = "是一个大二女大学生，现在正在上网和群友聊天。"
 BASE_REPLY_STYLE = "你的风格平淡简短，不爱用语气词。"
@@ -105,7 +104,7 @@ class FakeContext:
     """伪造的插件上下文，只提供插件真正用到的那几个入口。"""
 
     def __init__(self, data_dir: Path) -> None:
-        self.logger = logging.getLogger("persona_switcher.selfcheck")
+        self.logger = logging.getLogger("mai_is_mortis.selfcheck")
         self.paths = FakePaths(data_dir)
         self.config = FakeConfigCapability(
             {
@@ -273,7 +272,7 @@ def check_profiles_and_parser(checker: Checker, plugin: Any) -> None:
     """校验人格档案编译、编号解析与判定提示词。"""
 
     print("\n[2] 人格档案与判定解析")
-    logger = logging.getLogger("persona_switcher.selfcheck")
+    logger = logging.getLogger("mai_is_mortis.selfcheck")
     profiles = build_profiles(plugin.config.personas.personas, logger)
     checker.expect(list(profiles.keys()) == ["sharp_tongue", "sweet"], "按配置顺序编译出两个人格")
     sharp = profiles["sharp_tongue"]
@@ -466,11 +465,11 @@ async def main() -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     # 数据写在系统临时目录里：避免在插件目录下产生文件而被宿主的插件热重载监听扫到
-    data_dir = Path(tempfile.mkdtemp(prefix="persona_switcher_selfcheck_"))
+    data_dir = Path(tempfile.mkdtemp(prefix="mai_is_mortis_selfcheck_"))
     print(f"自检数据目录: {data_dir}")
 
     checker = Checker()
-    plugin = PersonaSwitcherPlugin()
+    plugin = MaiIsMortisPlugin()
     plugin._set_context(FakeContext(data_dir))
     plugin.set_plugin_config(plugin.get_default_config())
 

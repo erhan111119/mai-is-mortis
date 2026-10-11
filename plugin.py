@@ -1,28 +1,24 @@
-"""人格切换插件：用「模型判定 → 加分 → 满即切换」让麦麦临时换人格。
+"""mai is mortis —— 麦麦是多首的怪物。
 
-玩法（默认配置）：
+每来一批消息，插件把最近的对话交给模型判定一次：模型按每个人格的「判定条件」回编号，
+命中就给对应人格加分（有人骂麦麦 → 嘴臭人格加分，有人夸麦麦 → 撒娇人格加分）。
+某个人格分数顶到阈值就切过去、其他人格清零，维持一段时间后自动切回原人格；分数随时间衰减。
 
-* 每来一批消息，插件把最近的对话交给模型判定一次：模型按每个人格的「判定条件」回编号；
-* 命中哪个条件，就给对应人格加「命中加分」（例如有人骂麦麦 → 嘴臭人格 +12）；
-* 某个人格分数顶到阈值 → 立刻切到该人格，其他人格分数清零；
-* 该人格维持若干分钟后自动切回原人格；
-* 分数随时间衰减：最后一次加分后的宽限期内不掉，之后每分钟按配置速度掉。
+与宿主交互的三处：
 
-实现上有四处与宿主交互：
-
-1. ``chat.receive.after_process``：记录消息、按抖动等待 + 冷却节流地发起模型判定；
+1. ``chat.receive.after_process``：记录消息，按「抖动等待 + 判定冷却」节流地发起判定；
 2. ``maisaka.replyer.before_model_request``：临时人格生效时，把系统提示里的人设、
-   说话风格段落替换成该人格的版本（规划器请求走 ``maisaka.planner.before_request``）；
+   说话风格段落替换成该人格的版本（规划器走 ``maisaka.planner.before_request``）；
 3. ``maisaka.replyer.before_request``：把人格的「额外要求」并进本次回复要求。
 
 原人格始终取自宿主配置（``personality.personality`` / ``reply_style`` / ``behavior_style``），
-插件只改写「这一次发给模型的请求」，不写宿主配置，所以临时人格到期即自动恢复，
+插件只改写「这一次发给模型的请求」，不写宿主配置：临时人格到期即自动恢复，
 宿主配置热重载也会立刻反映到下一次回复。
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any, Dict, List, Optional, Tuple
 
 from maibot_sdk import Command, HookHandler, MaiBotPlugin
@@ -31,20 +27,18 @@ from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder
 import asyncio
 import time
 
-from .switcher.config import PersonaSwitcherConfig
-from .switcher.evaluator import judge_message
-from .switcher.personas import PersonaProfile, build_profiles, judged_profiles
-from .switcher.prompt_patch import BaseTextCache, PersonaTexts, patch_system_items
-from .switcher.state import ScoreBoard
+from .mortis.config import MortisConfig
+from .mortis.judge import PersonaProfile, build_profiles, judge_message, judged_profiles
+from .mortis.prompt_patch import BaseTextCache, PersonaTexts, patch_system_items
+from .mortis.state import ScoreBoard
 
 STATE_FILE_NAME = "persona_scores.json"
-"""分数状态在插件数据目录里的文件名。"""
 
 
-class PersonaSwitcherPlugin(MaiBotPlugin):
-    """人格切换插件主类。"""
+class MaiIsMortisPlugin(MaiBotPlugin):
+    """插件主类：计分、切换与提示词改写。"""
 
-    config_model = PersonaSwitcherConfig
+    config_model = MortisConfig
     config_reload_subscriptions = ("bot",)
 
     def __init__(self) -> None:
@@ -72,10 +66,9 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
         self._board = board
         self._apply_config()
         await asyncio.to_thread(board.load)
-        persona_names = "、".join(profile.name for profile in self._profiles.values()) or "未配置"
         self.ctx.logger.info(
-            "人格切换插件已加载：人格=%s；判定模型任务=%s；衰减 %.1f 分/分钟（宽限 %.1f 分钟）",
-            persona_names,
+            "mai is mortis 已加载：人格=%s；判定模型任务=%s；衰减 %.1f 分/分钟（宽限 %.1f 分钟）",
+            "、".join(profile.name for profile in self._profiles.values()) or "未配置",
             self.config.evaluation.model_task or "默认",
             self.config.scoring.decay_per_minute,
             self.config.scoring.decay_grace_minutes,
@@ -89,26 +82,21 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
         self._judge_tasks.clear()
         self._judge_pending.clear()
         await self._save_state(time.time(), force=True)
-        self.ctx.logger.info("人格切换插件已卸载")
+        self.ctx.logger.info("mai is mortis 已卸载")
 
     async def on_config_update(self, scope: str, config_data: dict[str, Any], version: str) -> None:
-        """处理配置热重载。
-
-        Args:
-            scope: 配置范围：``self`` 为插件自身配置，``bot`` 为宿主 bot 配置。
-            config_data: 该范围下的最新配置。
-            version: 配置版本号。
-        """
+        """处理配置热重载：``self`` 重编译人格，``bot`` 刷新宿主原人格文本。"""
 
         if scope == "self":
             self._apply_config()
-            persona_names = "、".join(profile.name for profile in self._profiles.values()) or "未配置"
-            self.ctx.logger.info("人格切换插件配置已更新：人格=%s（版本 %s）", persona_names, version)
+            self.ctx.logger.info(
+                "mai is mortis 配置已更新：人格=%s（版本 %s）",
+                "、".join(profile.name for profile in self._profiles.values()) or "未配置",
+                version,
+            )
             return
         if scope == "bot":
-            if self._base_cache.update_from_bot_config(config_data):
-                self.ctx.logger.debug("人格切换插件已同步宿主 bot 配置里的人设文本")
-            else:
+            if not self._base_cache.update_from_bot_config(config_data):
                 self._base_cache.invalidate()
 
     def _apply_config(self) -> None:
@@ -129,7 +117,7 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
 
     @HookHandler(
         "chat.receive.after_process",
-        name="persona_switcher_incoming",
+        name="mortis_incoming",
         description="记录消息并在合适的时机发起模型判定，命中就给人格加分。",
         mode=HookMode.BLOCKING,
         order=HookOrder.NORMAL,
@@ -148,13 +136,12 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
         if not session_id:
             return {"action": "continue"}
         is_mention = self._is_mention(message)
-        if config.switching.log_incoming:
+        if config.plugin.verbose_log:
             self.ctx.logger.debug(
-                "人格切换：收到消息 session=%s 文本长度=%d 是否@=%s 是否指令=%s 文本=%.40s",
+                "mai is mortis：收到消息 session=%s 长度=%d 是否@=%s 文本=%.40s",
                 session_id[:8],
                 len(text),
                 is_mention,
-                bool(message.get("is_command")),
                 text,
             )
         if not text or bool(message.get("is_command")):
@@ -169,11 +156,7 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
         return {"action": "continue"}
 
     def _schedule_judgement(self, session_id: str) -> None:
-        """按抖动等待与冷却节流地安排一次模型判定。
-
-        同一个会话同一时刻只会有一个判定任务：期间到达的新消息只标记「有更新」，
-        等这一轮判完（并等过冷却）再补一轮，避免热聊时每条消息都调一次模型。
-        """
+        """安排一次判定；同一会话同时只跑一个，新消息只标记「有更新」，判完补一轮。"""
 
         config = self.config
         board = self._board
@@ -196,7 +179,7 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
         task.add_done_callback(lambda finished, sid=session_id: self._on_judgement_done(sid, finished))
 
     def _on_judgement_done(self, session_id: str, task: asyncio.Task[Any]) -> None:
-        """判定任务结束后的清理：有积压消息就再排一轮。"""
+        """判定结束后清理，并补跑冷却期内积压的那一轮。"""
 
         if self._judge_tasks.get(session_id) is task:
             self._judge_tasks.pop(session_id, None)
@@ -207,7 +190,7 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
             self._schedule_judgement(session_id)
 
     async def _run_judgement(self, session_id: str) -> None:
-        """抖动等待后做一次判定，命中就加分并重新做切换判定。"""
+        """抖动等待后判定一次，命中就加分并重新做切换判定。"""
 
         evaluation = self.config.evaluation
         await asyncio.sleep(max(0.0, evaluation.debounce_seconds))
@@ -219,10 +202,8 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
         if self._scoring_paused(session_id, now):
             return
         targets = judged_profiles(self._profiles)
-        if not targets:
-            return
         history = board.recent(session_id)
-        if not history:
+        if not targets or not history:
             return
 
         board.mark_judged(session_id, now)
@@ -239,10 +220,10 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
                 max_tokens=evaluation.max_response_tokens,
             )
         except Exception as exc:
-            self.ctx.logger.warning(f"人格模型判定失败，本轮不加分: {exc}")
+            self.ctx.logger.warning(f"mai is mortis：模型判定失败，本轮不加分: {exc}")
             return
-        if evaluation.log_raw_response:
-            self.ctx.logger.debug("人格切换：判定原始输出=%s", outcome.raw_response[:120])
+        if self.config.plugin.verbose_log:
+            self.ctx.logger.debug("mai is mortis：判定原始输出=%s", outcome.raw_response[:120])
         if not outcome.matched_indexes:
             return
 
@@ -252,9 +233,9 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
         for index in outcome.matched_indexes:
             profile = targets[index]
             score = board.add_gain(session_id, profile.persona_id, profile.weight, now)
-            if self.config.switching.log_gain:
+            if self.config.plugin.verbose_log:
                 self.ctx.logger.info(
-                    "人格判定命中：%s +%.1f → %.1f/%.1f",
+                    "mai is mortis：%s +%.1f → %.1f/%.1f",
                     profile.name,
                     profile.weight,
                     score,
@@ -264,15 +245,13 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
         await self._save_state(now)
 
     def _scoring_paused(self, session_id: str, now: float) -> bool:
-        """判断当前是否暂停计分（临时人格生效中且配置为不累计）。"""
+        """临时人格生效中且配置为不累计时暂停计分（省下模型调用）。"""
 
         board = self._board
         if board is None:
             return True
         active_persona_id, _ = board.active_persona(session_id, now)
-        if not active_persona_id:
-            return False
-        return not self.config.switching.accumulate_while_active
+        return bool(active_persona_id) and not self.config.switching.accumulate_while_active
 
     def _maybe_switch(self, session_id: str, now: float) -> Optional[PersonaProfile]:
         """分数顶到阈值就切换人格，返回本次激活的人格。"""
@@ -296,7 +275,7 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
         if self.config.switching.reset_scores_on_switch:
             board.clear_scores(session_id)
         self.ctx.logger.info(
-            "人格切换：%s → %s（分数 %.1f/%.1f，维持 %.1f 分钟）",
+            "mai is mortis 人格切换：%s → %s（分数 %.1f/%.1f，维持 %.1f 分钟）",
             previous_persona_id or "原人格",
             chosen.name,
             score,
@@ -315,7 +294,7 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
         if expired_persona_id:
             expired = self._profiles.get(expired_persona_id)
             self.ctx.logger.info(
-                "临时人格「%s」已到期，恢复原人格",
+                "mai is mortis：临时人格「%s」已到期，恢复原人格",
                 expired.name if expired is not None else expired_persona_id,
             )
         if not active_persona_id:
@@ -326,7 +305,7 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
 
     @HookHandler(
         "maisaka.replyer.before_model_request",
-        name="persona_switcher_replyer_prompt",
+        name="mortis_replyer_prompt",
         description="临时人格生效时，把回复系统提示里的人设与说话风格换成该人格的版本。",
         mode=HookMode.BLOCKING,
         order=HookOrder.NORMAL,
@@ -342,12 +321,11 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
         patched_items, replaced = patch_system_items(items, base, self._persona_texts(persona))
         if not replaced:
             return {"action": "continue"}
-        self.ctx.logger.debug("临时人格「%s」已写入本次回复的系统提示", persona.name)
         return {"action": "continue", "modified_kwargs": {**kwargs, "items": patched_items}}
 
     @HookHandler(
         "maisaka.planner.before_request",
-        name="persona_switcher_planner_prompt",
+        name="mortis_planner_prompt",
         description="临时人格配置了行为风格时，同步改写规划器系统提示。",
         mode=HookMode.BLOCKING,
         order=HookOrder.NORMAL,
@@ -363,19 +341,15 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
             return {"action": "continue"}
         base = await self._base_cache.get(self.ctx)
         patched_items, replaced = patch_system_items(
-            items,
-            base,
-            self._persona_texts(persona),
-            behavior_style_only=True,
+            items, base, self._persona_texts(persona), behavior_style_only=True
         )
         if not replaced:
             return {"action": "continue"}
-        self.ctx.logger.debug("临时人格「%s」的行为风格已写入本次规划提示", persona.name)
         return {"action": "continue", "modified_kwargs": {**kwargs, "items": patched_items}}
 
     @HookHandler(
         "maisaka.replyer.before_request",
-        name="persona_switcher_replyer_requirement",
+        name="mortis_replyer_requirement",
         description="临时人格生效时，把该人格的额外要求并进本次回复要求。",
         mode=HookMode.BLOCKING,
         order=HookOrder.NORMAL,
@@ -385,13 +359,10 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
         """把人格的额外要求追加到 ``extra_prompt``。"""
 
         persona = self._active_persona(str(kwargs.get("session_id") or ""))
-        if persona is None:
-            return {"action": "continue"}
-        requirement = persona.extra_prompt
-        if not requirement:
+        if persona is None or not persona.extra_prompt:
             return {"action": "continue"}
         existing = str(kwargs.get("extra_prompt") or "").strip()
-        merged = f"{existing}\n{requirement}" if existing else requirement
+        merged = f"{existing}\n{persona.extra_prompt}" if existing else persona.extra_prompt
         return {"action": "continue", "modified_kwargs": {**kwargs, "extra_prompt": merged}}
 
     @staticmethod
@@ -408,7 +379,7 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
     # ──── 指令 ────────────────────────────────────────────────
 
     @Command(
-        "persona_status",
+        "mortis_persona",
         description="查看当前会话的人格分数与临时人格；支持 /人格 切换 <人格ID> 与 /人格 重置",
         pattern=r"^/(?:人格|persona)(?:\s+(?P<action>切换|重置|switch|reset))?(?:\s+(?P<argument>\S+))?$",
     )
@@ -416,7 +387,7 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
         """处理 /人格 指令：查询状态、手动切换、重置分数。"""
 
         if not self.config.plugin.enabled or self._board is None:
-            return True, "人格切换插件当前已停用。", 2
+            return True, "mai is mortis 当前已停用。", 2
 
         session_id = str(kwargs.get("stream_id") or "")
         matched_groups = kwargs.get("matched_groups")
@@ -447,7 +418,7 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
             return f"没有找到人格「{persona_id or '空'}」。可用的人格 ID：{available}"
         board = self._board
         if board is None:
-            return "人格切换插件当前不可用。"
+            return "mai is mortis 当前不可用。"
         board.activate(session_id, persona.persona_id, now, persona.duration_minutes)
         return f"已手动切换到「{persona.name}」，{persona.duration_minutes:g} 分钟后自动切回原人格。"
 
@@ -456,14 +427,15 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
 
         board = self._board
         if board is None:
-            return "人格切换插件当前不可用。"
+            return "mai is mortis 当前不可用。"
         active_persona_id, _ = board.active_persona(session_id, now)
         lines: List[str] = ["【人格状态】"]
         if active_persona_id:
             persona = self._profiles.get(active_persona_id)
             remaining = board.remaining_seconds(session_id, now)
             lines.append(
-                f"当前：{persona.name if persona is not None else active_persona_id}（剩余 {self._format_duration(remaining)}）"
+                f"当前：{persona.name if persona is not None else active_persona_id}"
+                f"（剩余 {self._format_duration(remaining)}）"
             )
         else:
             lines.append("当前：原人格")
@@ -533,10 +505,10 @@ class PersonaSwitcherPlugin(MaiBotPlugin):
         try:
             await asyncio.to_thread(board.save, now)
         except OSError as exc:
-            self.ctx.logger.error(f"人格分数状态落盘失败: {exc}")
+            self.ctx.logger.error(f"mai is mortis：分数状态落盘失败: {exc}")
 
 
-def create_plugin() -> PersonaSwitcherPlugin:
+def create_plugin() -> MaiIsMortisPlugin:
     """返回插件实例。"""
 
-    return PersonaSwitcherPlugin()
+    return MaiIsMortisPlugin()

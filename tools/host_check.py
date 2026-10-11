@@ -43,7 +43,7 @@ def check_manifest() -> str:
 def load_plugin():
     """按宿主 PluginLoader 的方式加载插件实例。"""
 
-    module_name = "persona_switcher_host_check"
+    module_name = "mai_is_mortis_host_check"
     spec = importlib.util.spec_from_file_location(
         module_name,
         str(PLUGIN_DIR / "plugin.py"),
@@ -145,7 +145,7 @@ def check_item_contract() -> None:
     from src.llm_models.payload_content.context_protocol import ContextProtocolMode
     from src.plugin_runtime.hook_payloads import deserialize_prompt_items, serialize_prompt_items
 
-    from switcher.prompt_patch import BasePersonaTexts, PersonaTexts, patch_system_items
+    from mortis.prompt_patch import BasePersonaTexts, PersonaTexts, patch_system_items
 
     original_items = [
         ContextItemBuilder()
