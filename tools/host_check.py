@@ -100,18 +100,21 @@ def _count_fields(node: object) -> int:
 
 
 def check_config_schema(instance) -> None:
-    """生成 WebUI 配置 Schema 并打印配置节。"""
+    """生成 WebUI 配置 Schema 并打印配置节（插件页显示的正是这里的 plugin_info.name）。"""
 
+    manifest = json.loads((PLUGIN_DIR / "_manifest.json").read_text(encoding="utf-8"))
     schema = instance.build_config_schema(
-        plugin_id="github.erhan111119.mai-is-mortis",
-        plugin_name="mai is mortis",
-        plugin_version="1.0.0",
-        plugin_description="",
-        plugin_author="erhan111119",
+        plugin_id=manifest["id"],
+        plugin_name=manifest["name"],
+        plugin_version=manifest["version"],
+        plugin_description=manifest["description"],
+        plugin_author=manifest["author"]["name"],
     )
     if not schema:
         raise SystemExit("配置 Schema 为空")
     print(f"[4] 配置 Schema 生成成功: 顶层字段={list(schema.keys())}")
+    plugin_info = schema.get("plugin_info") or {}
+    print(f"    插件页显示名: {plugin_info.get('name')!r} | 版本 {plugin_info.get('version')!r}")
     raw_sections = schema.get("sections")
     if isinstance(raw_sections, dict):
         sections = [(key, value) for key, value in raw_sections.items() if isinstance(value, dict)]
