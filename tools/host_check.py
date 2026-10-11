@@ -1,7 +1,7 @@
 """把插件交给宿主自己的加载/校验代码验证，但不启动机器人。
 
 用法（工作目录随意）：
-    <MaiBot>/python-env/python.exe plugins/persona-switcher/tools/host_check.py
+    <MaiBot>/python-env/python.exe plugins/mai-is-mortis/tools/host_check.py
 
 校验内容：
 1. ``_manifest.json`` 能否通过宿主的 Manifest 校验（含 Host / SDK 版本区间与依赖）；
@@ -103,11 +103,11 @@ def check_config_schema(instance) -> None:
     """生成 WebUI 配置 Schema 并打印配置节。"""
 
     schema = instance.build_config_schema(
-        plugin_id="local.persona-switcher",
-        plugin_name="人格切换（评分触发）",
+        plugin_id="github.erhan111119.mai-is-mortis",
+        plugin_name="mai is mortis",
         plugin_version="1.0.0",
         plugin_description="",
-        plugin_author="MaiBot 本地插件",
+        plugin_author="erhan111119",
     )
     if not schema:
         raise SystemExit("配置 Schema 为空")

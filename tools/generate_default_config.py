@@ -1,9 +1,9 @@
 """按配置模型重新生成插件根目录的默认 ``config.toml``。
 
-配置模型（``switcher/config.py``）改动后跑一次，保持默认配置文件与模型同步。
+配置模型（``mortis/config.py``）改动后跑一次，保持默认配置文件与模型同步。
 
 用法（工作目录随意）：
-    <MaiBot>/python-env/python.exe plugins/persona-switcher/tools/generate_default_config.py
+    <MaiBot>/python-env/python.exe plugins/mai-is-mortis/tools/generate_default_config.py
 """
 
 from __future__ import annotations
