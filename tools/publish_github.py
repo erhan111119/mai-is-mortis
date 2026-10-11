@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Optional, Tuple
 API_HOST = "api.github.com"
 OWNER = "erhan111119"
 REPO = "mai-is-mortis"
-DESCRIPTION = "MaiBot 插件：麦麦是多首的怪物——被骂长出嘴臭的头、被夸长出撒娇的头（模型判定打分，分数满即临时换人格）"
+DESCRIPTION = "MaiBot 插件：麦麦是多首的怪物。加分全部由模型判定，分数满了临时换人格、到点自动切回原人格，分数随时间衰减。"
 TAG = "v1.0.0"
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 REMOTE_URL = f"https://github.com/{OWNER}/{REPO}.git"
