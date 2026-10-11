@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Tuple
 
 import json
+import logging
 import os
 import time
 
@@ -265,16 +266,23 @@ class ScoreBoard:
 
     # ──── 落盘 ────────────────────────────────────────────────
 
-    def load(self) -> None:
-        """从磁盘读取状态；文件不存在时按空账本处理。"""
+    def load(self, logger: logging.Logger) -> None:
+        """从磁盘读取状态；文件缺失或已损坏时按空账本处理（只记日志，不影响插件启动）。
+
+        Args:
+            logger: 用于报告文件损坏的日志器。
+        """
 
         if not self._path.exists():
             return
         try:
             payload = json.loads(self._path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
-            raise RuntimeError(f"人格分数状态文件无法读取: {self._path}") from exc
+            # 分数只是缓存：坏文件不该拦住宿主启动插件，读不出来就报错并从零开始
+            logger.error(f"mai is mortis：状态文件无法读取，已按空账本继续（{self._path}）：{exc}")
+            return
         if not isinstance(payload, Mapping) or int(payload.get("version", 0)) != STATE_FILE_VERSION:
+            logger.warning(f"mai is mortis：状态文件格式不认识，已按空账本继续（{self._path}）")
             return
         raw_sessions = payload.get("sessions")
         if not isinstance(raw_sessions, Mapping):

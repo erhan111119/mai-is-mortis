@@ -65,7 +65,7 @@ class MaiIsMortisPlugin(MaiBotPlugin):
         )
         self._board = board
         self._apply_config()
-        await asyncio.to_thread(board.load)
+        await asyncio.to_thread(board.load, self.ctx.logger)
         self.ctx.logger.info(
             "mai is mortis 已加载：人格=%s；判定模型任务=%s；衰减 %.1f 分/分钟（宽限 %.1f 分钟）",
             "、".join(profile.name for profile in self._profiles.values()) or "未配置",

@@ -1,5 +1,5 @@
 [plugin]
-config_version = "1.0.0"
+config_version = "1.0.1"
 enabled = true
 verbose_log = true
 
@@ -26,7 +26,6 @@ recent_message_count = 8
 min_text_length = 2
 
 [command]
-enabled = true
 operator_user_ids = []
 
 [[personas.personas]]

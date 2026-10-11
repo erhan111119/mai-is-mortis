@@ -263,9 +263,29 @@ def check_score_board(checker: Checker, data_dir: Path) -> None:
     board.save(now)
     reloaded = ScoreBoard(data_dir / "scores.json", max_sessions=10)
     reloaded.configure(decay_per_minute=6.0, grace_minutes=1.0, score_cap=50.0, max_sessions=10)
-    reloaded.load()
+    reloaded.load(logging.getLogger("mai_is_mortis.selfcheck"))
     checker.expect_close(reloaded.effective_score("s3", "sweet", now + 60.0), 12.0, "重启后分数还在")
     checker.expect(reloaded.active_persona("s3", now + 60.0)[0] == "sweet", "重启后临时人格与剩余时间还在")
+
+    # 状态文件损坏：只记日志、不抛异常，按空账本继续（坏文件不该拦住宿主启动插件）
+    broken_path = data_dir / "broken.json"
+    broken_path.write_text("{ 这不是 JSON", encoding="utf-8")
+    broken = ScoreBoard(broken_path, max_sessions=10)
+    broken.configure(decay_per_minute=6.0, grace_minutes=1.0, score_cap=50.0, max_sessions=10)
+    try:
+        broken.load(logging.getLogger("mai_is_mortis.selfcheck"))
+        checker.expect(True, "损坏的状态文件不再拦插件加载")
+    except Exception as exc:  # noqa: BLE001 - 自检就是要确认这里不抛异常
+        checker.expect(False, "损坏的状态文件不再拦插件加载", f"抛出了 {exc!r}")
+    checker.expect_close(broken.effective_score("s3", "sweet", now), 0.0, "损坏文件按空账本处理")
+
+    # 版本不认识的旧文件同样只记日志
+    stale_path = data_dir / "stale.json"
+    stale_path.write_text('{"version": 0, "sessions": {"s3": {}}}', encoding="utf-8")
+    stale = ScoreBoard(stale_path, max_sessions=10)
+    stale.configure(decay_per_minute=6.0, grace_minutes=1.0, score_cap=50.0, max_sessions=10)
+    stale.load(logging.getLogger("mai_is_mortis.selfcheck"))
+    checker.expect(stale.snapshot("s3", now, ["sweet"]) == [("sweet", 0.0)], "版本不匹配的状态文件按空账本处理")
 
 
 def check_profiles_and_parser(checker: Checker, plugin: Any) -> None:

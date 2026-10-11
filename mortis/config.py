@@ -75,7 +75,7 @@ class PluginSection(PluginConfigBase):
     __ui_order__ = 0
 
     config_version: str = Field(
-        default="1.0.0",
+        default="1.0.1",
         description="配置版本，普通用户不要修改",
         json_schema_extra={"label": "配置版本"},
     )
@@ -86,7 +86,7 @@ class PluginSection(PluginConfigBase):
     )
     verbose_log: bool = Field(
         default=True,
-        description="记录入站消息、判定原始输出与每次加分的日志，调判定条件与阈值时很有用",
+        description="记录入站消息（截断 40 字）、判定原始输出与每次加分的日志，调参时很有用；调完建议关掉",
         json_schema_extra={"label": "详细日志"},
     )
 
@@ -199,17 +199,15 @@ class EvaluationSection(PluginConfigBase):
 
 
 class CommandSection(PluginConfigBase):
-    """指令：/人格 查询状态，以及手动切换 / 重置。"""
+    """指令：/人格 查询状态，以及手动切换 / 重置。
+
+    ``/人格`` 是静态注册的命令，启用/停用请走宿主 WebUI 的「命令管理」页面，插件不另设开关。
+    """
 
     __ui_label__ = "指令"
     __ui_icon__ = "terminal"
     __ui_order__ = 4
 
-    enabled: bool = Field(
-        default=True,
-        description="是否注册 /人格 指令",
-        json_schema_extra={"label": "启用指令"},
-    )
     operator_user_ids: list[str] = Field(
         default_factory=list,
         description="允许用指令手动切换 / 重置人格的用户 ID；本机操作者始终允许",

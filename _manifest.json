@@ -1,8 +1,8 @@
 {
   "manifest_version": 2,
   "id": "github.erhan111119.mai-is-mortis",
-  "version": "1.0.0",
-  "name": "mai is mortis",
+  "version": "1.0.1",
+  "name": "mai is mortis（麦麦是多首的怪物）",
   "description": "麦麦是多首的怪物。加分的唯一来源是模型判定：插件把最近的对话交给模型，按每个人格的一句话「判定条件」回编号，命中就给对应人格加分；某个人格分数顶到阈值就临时换人格、其他人格分数清零，维持一段时间后自动切回原人格，分数还会随时间衰减。人格、判定条件、阈值、时长全部可在 WebUI 里改，支持 /人格 查看分数与手动切换。",
   "author": {
     "name": "erhan111119",

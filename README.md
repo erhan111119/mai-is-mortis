@@ -1,4 +1,4 @@
-# mai is mortis
+# mai is mortis（麦麦是多首的怪物）
 
 **麦麦是多首的怪物。**
 
@@ -66,12 +66,12 @@
 - 想切换更快：降阈值、提高命中加分，或把「衰减宽限分钟」拉长；
 - 想更省 token：把「判定冷却秒」调到 15~30、「抖动等待秒」调到 3、「最短判定长度」调大；
 - 判定不准时先改「判定条件」那句话，比调分数有效得多；
-- 调参时保持「详细日志」开着，日志里能看到模型这次回了什么编号、是谁加了分。
+- 调参时保持「详细日志」开着，日志里能看到模型这次回了什么编号、是谁加了分；**调完记得关掉**（它会记入站消息文本）。
 
 ## 开发
 
 ```bash
-# 逻辑自检（评分、衰减、判定解析、切换、到期、提示词替换、指令、节流与异常）
+# 逻辑自检（评分、衰减、判定解析、切换、到期、提示词替换、指令、节流、损坏状态文件兜底）
 python tests/selfcheck.py                 # 用宿主的 python-env 解释器运行
 
 # 宿主侧校验（Manifest、组件注册、WebUI 配置 Schema、Item 契约往返）
@@ -80,6 +80,10 @@ cd <MaiBot> && python-env/python.exe plugins/mai-is-mortis/tools/host_check.py
 # 改过配置模型后重新生成默认 config.toml
 cd <MaiBot> && python-env/python.exe plugins/mai-is-mortis/tools/generate_default_config.py
 ```
+
+仓库里的 `config.toml` 就是上面那条命令从配置模型生成的默认配置；WebUI 保存配置会重写它，本地改动不用提交。
+`tools/publish_github.py` 只是维护者用的发布脚本（宿主不会加载它）：它从 git 凭据库读 GitHub token、
+只访问写死的 `api.github.com` 并校验解析出的 IP 为公网地址，代码里不含任何凭据。
 
 ## 已知限制
 
