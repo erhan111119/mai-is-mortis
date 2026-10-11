@@ -1,0 +1,43 @@
+{
+  "manifest_version": 2,
+  "id": "local.persona-switcher",
+  "version": "1.0.0",
+  "name": "人格切换（评分触发）",
+  "description": "用评分机制让麦麦临时换人格：骂她一句就加「嘴臭」的分，夸她一句就加「撒娇」的分；某个人格分数顶到阈值立刻切过去，其他人格分数清零，维持一段时间后自动切回原人格，分数还会随时间衰减。人格的设定文本、触发词、权重、阈值、维持时长、衰减速度全部可在 WebUI 里改，并支持 /人格 查看分数与手动切换。",
+  "author": {
+    "name": "MaiBot 本地插件",
+    "url": "https://github.com/Mai-with-u"
+  },
+  "license": "MIT",
+  "urls": {
+    "repository": "https://github.com/Mai-with-u/MaiBot",
+    "homepage": "https://github.com/Mai-with-u/MaiBot",
+    "documentation": "https://github.com/Mai-with-u/maibot-plugin-sdk/blob/main/docs/guide.md"
+  },
+  "changelog": "CHANGELOG.md",
+  "host_application": {
+    "min_version": "1.0.0",
+    "max_version": "1.99.99"
+  },
+  "sdk": {
+    "min_version": "2.10.0",
+    "max_version": "2.99.99"
+  },
+  "dependencies": [],
+  "capabilities": [
+    "config.get",
+    "llm.generate"
+  ],
+  "i18n": {
+    "default_locale": "zh-CN",
+    "supported_locales": [
+      "zh-CN"
+    ]
+  },
+  "display": {
+    "icon": {
+      "type": "lucide",
+      "value": "venetian-mask"
+    }
+  }
+}
