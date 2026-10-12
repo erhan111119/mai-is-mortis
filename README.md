@@ -77,11 +77,12 @@ python tests/selfcheck.py                 # 用宿主的 python-env 解释器运
 # 宿主侧校验（Manifest、组件注册、WebUI 配置 Schema、Item 契约往返）
 cd <MaiBot> && python-env/python.exe plugins/mai-is-mortis/tools/host_check.py
 
-# 改过配置模型后重新生成默认 config.toml
+# 改过配置模型后重新生成配置模板 config.toml.example
 cd <MaiBot> && python-env/python.exe plugins/mai-is-mortis/tools/generate_default_config.py
 ```
 
-仓库里的 `config.toml` 就是上面那条命令从配置模型生成的默认配置；WebUI 保存配置会重写它，本地改动不用提交。
+仓库**不跟踪** `config.toml`：宿主首次加载插件时会按配置模型自动生成它，WebUI 保存配置也会重写它。
+提交进版本库的是模板 `config.toml.example`，由上面那条命令从 `mortis/config.py` 的配置模型生成。
 `tools/publish_github.py` 只是维护者用的发布脚本（宿主不会加载它）：它从 git 凭据库读 GitHub token、
 只访问写死的 `api.github.com` 并校验解析出的 IP 为公网地址，代码里不含任何凭据。
 

@@ -3,6 +3,11 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 
+# 本机实际配置（WebUI 保存会重写它）——模板见 config.toml.example，
+# 宿主首次加载插件时也会按配置模型自动生成 config.toml
+config.toml
+config_back/
+
 # 插件运行数据（宿主的数据目录在 data/plugins/<plugin_id>，
 # 这里只是防止有人在插件目录下跑实验脚本时留下东西）
 data/
